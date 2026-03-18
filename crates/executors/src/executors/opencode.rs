@@ -34,7 +34,7 @@ mod slash_commands;
 pub(crate) mod types;
 
 use sdk::{
-    AgentInfo as SDKAgentInfo, LogWriter, RunConfig, build_authenticated_client,
+    AgentInfo as SDKAgentInfo, LogWriter, RunConfig, build_authenticated_client_with_options,
     generate_server_password, list_agents, list_commands, list_providers, run_session,
     run_slash_command,
 };
@@ -71,7 +71,9 @@ struct OpencodeServer {
     #[allow(unused)]
     child: Option<AsyncGroupChild>,
     base_url: String,
+    server_username: String,
     server_password: ServerPassword,
+    disable_auth: bool,
 }
 
 impl Drop for OpencodeServer {
@@ -88,6 +90,57 @@ impl Drop for OpencodeServer {
 type ServerPassword = String;
 
 impl Opencode {
+    fn env_var(env: &ExecutionEnv, key: &str) -> Option<String> {
+        if let Some(value) = env.get(key) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+
+        std::env::var(key)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
+    fn remote_server_base_url(env: &ExecutionEnv) -> Option<String> {
+        Self::env_var(env, "OPENCODE_REMOTE_BASE_URL")
+    }
+
+    fn remote_server_disable_auth(env: &ExecutionEnv) -> bool {
+        Self::env_var(env, "OPENCODE_REMOTE_DISABLE_AUTH")
+            .map(|value| value.trim().to_ascii_lowercase())
+            .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+    }
+
+    fn remote_server_username(env: &ExecutionEnv) -> String {
+        Self::env_var(env, "OPENCODE_REMOTE_USERNAME")
+            .unwrap_or_else(|| "opencode".to_string())
+    }
+
+    fn remote_server_password(env: &ExecutionEnv) -> Result<String, ExecutorError> {
+        Self::env_var(env, "OPENCODE_REMOTE_PASSWORD")
+            .ok_or_else(|| {
+                ExecutorError::Io(std::io::Error::other(
+                    "OPENCODE_REMOTE_BASE_URL is set but OPENCODE_REMOTE_PASSWORD is missing",
+                ))
+            })
+    }
+
+    fn spawn_placeholder_process(current_dir: &Path) -> Result<AsyncGroupChild, ExecutorError> {
+        let mut command = Command::new("sh");
+        command
+            .kill_on_drop(true)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .current_dir(current_dir)
+            .arg("-lc")
+            .arg("sleep infinity");
+        command.group_spawn_no_window().map_err(ExecutorError::Io)
+    }
+
     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
         let builder = CommandBuilder::new("npx -y opencode-ai@1.2.27")
             // Pass hostname/port as separate args so OpenCode treats them as explicitly set
@@ -141,6 +194,25 @@ impl Opencode {
         current_dir: &Path,
         env: &ExecutionEnv,
     ) -> Result<OpencodeServer, ExecutorError> {
+        if let Some(base_url) = Self::remote_server_base_url(env) {
+            let child = Self::spawn_placeholder_process(current_dir)?;
+            let server_username = Self::remote_server_username(env);
+            let disable_auth = Self::remote_server_disable_auth(env);
+            let server_password = if disable_auth {
+                String::new()
+            } else {
+                Self::remote_server_password(env)?
+            };
+
+            return Ok(OpencodeServer {
+                child: Some(child),
+                base_url,
+                server_username,
+                server_password,
+                disable_auth,
+            });
+        }
+
         let (mut child, server_password) = self.spawn_server_process(current_dir, env).await?;
         let server_stdout = child.inner().stdout.take().ok_or_else(|| {
             ExecutorError::Io(std::io::Error::other("OpenCode server missing stdout"))
@@ -151,7 +223,9 @@ impl Opencode {
         Ok(OpencodeServer {
             child: Some(child),
             base_url,
+            server_username: "opencode".to_string(),
             server_password,
+            disable_auth: false,
         })
     }
 
@@ -169,10 +243,39 @@ impl Opencode {
             self.append_prompt.combine_prompt(prompt)
         };
 
-        let (mut child, server_password) = self.spawn_server_process(current_dir, env).await?;
-        let server_stdout = child.inner().stdout.take().ok_or_else(|| {
-            ExecutorError::Io(std::io::Error::other("OpenCode server missing stdout"))
-        })?;
+        let remote_base_url = Self::remote_server_base_url(env);
+        let (mut child, base_url, server_username, server_password, disable_auth) =
+            if let Some(base_url) = remote_base_url
+        {
+            let child = Self::spawn_placeholder_process(current_dir)?;
+            let server_username = Self::remote_server_username(env);
+            let disable_auth = Self::remote_server_disable_auth(env);
+            let server_password = if disable_auth {
+                String::new()
+            } else {
+                Self::remote_server_password(env)?
+            };
+            (
+                child,
+                base_url,
+                server_username,
+                server_password,
+                disable_auth,
+            )
+        } else {
+            let (mut child, server_password) = self.spawn_server_process(current_dir, env).await?;
+            let server_stdout = child.inner().stdout.take().ok_or_else(|| {
+                ExecutorError::Io(std::io::Error::other("OpenCode server missing stdout"))
+            })?;
+            let base_url = wait_for_server_url(server_stdout, None).await?;
+            (
+                child,
+                base_url,
+                "opencode".to_string(),
+                server_password,
+                false,
+            )
+        };
 
         let stdout = create_stdout_pipe_writer(&mut child)?;
         let log_writer = LogWriter::new(stdout);
@@ -195,19 +298,6 @@ impl Opencode {
         let repo_context = env.repo_context.clone();
 
         tokio::spawn(async move {
-            // Wait for server to print listening URL
-            let base_url = match wait_for_server_url(server_stdout, Some(log_writer.clone())).await
-            {
-                Ok(url) => url,
-                Err(err) => {
-                    let _ = log_writer
-                        .log_error(format!("OpenCode startup error: {err}"))
-                        .await;
-                    let _ = exit_signal_tx.send(ExecutorExitResult::Failure);
-                    return;
-                }
-            };
-
             let config = RunConfig {
                 base_url,
                 directory,
@@ -218,7 +308,9 @@ impl Opencode {
                 agent,
                 approvals,
                 auto_approve,
+                server_username,
                 server_password,
+                disable_auth,
                 models_cache_key,
                 commit_reminder,
                 commit_reminder_prompt,
@@ -613,7 +705,12 @@ impl StandardCodingAgentExecutor for Opencode {
             };
 
             let directory = discovery_path.to_string_lossy();
-            let client = match build_authenticated_client(&directory, &server.server_password) {
+            let client = match build_authenticated_client_with_options(
+                &directory,
+                &server.server_username,
+                &server.server_password,
+                server.disable_auth,
+            ) {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::warn!("Failed to build authenticated client: {}", e);

@@ -18,23 +18,20 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 ARG POSTHOG_API_KEY
 ARG POSTHOG_API_ENDPOINT
+ARG VITE_PUBLIC_REACT_VIRTUOSO_LICENSE_KEY
 
 ENV VITE_PUBLIC_POSTHOG_KEY=$POSTHOG_API_KEY
 ENV VITE_PUBLIC_POSTHOG_HOST=$POSTHOG_API_ENDPOINT
+ENV VITE_PUBLIC_REACT_VIRTUOSO_LICENSE_KEY=$VITE_PUBLIC_REACT_VIRTUOSO_LICENSE_KEY
 
 # Set working directory
 WORKDIR /app
 
-# Copy package files for dependency caching
-COPY package*.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY packages/local-web/package*.json ./packages/local-web/
-COPY npx-cli/package*.json ./npx-cli/
+# Copy source code
+COPY . .
 
 # Install pnpm and dependencies
 RUN npm install -g pnpm && pnpm install
-
-# Copy source code
-COPY . .
 
 # Build application
 RUN npm run generate-types
@@ -49,21 +46,17 @@ RUN apk add --no-cache \
     ca-certificates \
     tini \
     libgcc \
-    wget
-
-# Create app user for security
-RUN addgroup -g 1001 -S appgroup && \
-    adduser -u 1001 -S appuser -G appgroup
+    wget \
+    git \
+    openssh-client \
+    nodejs \
+    npm
 
 # Copy binary from builder
 COPY --from=builder /app/target/release/server /usr/local/bin/server
 
-# Create repos directory and set permissions
-RUN mkdir -p /repos && \
-    chown -R appuser:appgroup /repos
-
-# Switch to non-root user
-USER appuser
+# Create repos directory
+RUN mkdir -p /repos
 
 # Set runtime environment
 ENV HOST=0.0.0.0

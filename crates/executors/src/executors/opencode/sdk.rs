@@ -81,7 +81,9 @@ pub struct RunConfig {
     pub agent: Option<String>,
     pub approvals: Option<Arc<dyn ExecutorApprovalService>>,
     pub auto_approve: bool,
+    pub server_username: String,
     pub server_password: String,
+    pub disable_auth: bool,
     /// Cache key for model context windows. Should be derived from configuration
     /// that affects available models (e.g., env vars, base command).
     pub models_cache_key: String,
@@ -236,7 +238,12 @@ pub async fn run_session(
     log_writer: LogWriter,
     cancel: CancellationToken,
 ) -> Result<(), ExecutorError> {
-    let client = build_opencode_client(&config.directory, &config.server_password)?;
+    let client = build_opencode_client(
+        &config.directory,
+        &config.server_username,
+        &config.server_password,
+        config.disable_auth,
+    )?;
 
     run_session_inner(config, log_writer, client, cancel).await
 }
@@ -247,7 +254,12 @@ pub async fn run_slash_command(
     command: slash_commands::OpencodeSlashCommand,
     cancel: CancellationToken,
 ) -> Result<(), ExecutorError> {
-    let client = build_opencode_client(&config.directory, &config.server_password)?;
+    let client = build_opencode_client(
+        &config.directory,
+        &config.server_username,
+        &config.server_password,
+        config.disable_auth,
+    )?;
 
     slash_commands::execute(config, command, log_writer, client, cancel.clone()).await
 }
@@ -391,36 +403,50 @@ async fn run_session_inner(
     Ok(())
 }
 
-fn build_default_headers(directory: &str, password: &str) -> HeaderMap {
+fn build_default_headers(
+    directory: &str,
+    username: &str,
+    password: &str,
+    disable_auth: bool,
+) -> HeaderMap {
     let mut headers = HeaderMap::new();
     if let Ok(value) = HeaderValue::from_str(directory) {
         headers.insert("x-opencode-directory", value);
     }
-    let credentials = BASE64.encode(format!("opencode:{password}"));
-    if let Ok(value) = HeaderValue::from_str(&format!("Basic {credentials}")) {
-        headers.insert(AUTHORIZATION, value);
+    if !disable_auth {
+        let credentials = BASE64.encode(format!("{username}:{password}"));
+        if let Ok(value) = HeaderValue::from_str(&format!("Basic {credentials}")) {
+            headers.insert(AUTHORIZATION, value);
+        }
     }
     headers
 }
 
-/// Build HTTP client with OpenCode authentication headers.
-/// Uses Basic Auth: "opencode:{password}" base64 encoded.
-pub fn build_authenticated_client(
+pub fn build_authenticated_client_with_options(
     directory: &str,
+    username: &str,
     password: &str,
+    disable_auth: bool,
 ) -> Result<reqwest::Client, ExecutorError> {
-    build_opencode_client(directory, password)
+    build_opencode_client(directory, username, password, disable_auth)
 }
 
 fn build_opencode_client(
     directory: &str,
+    username: &str,
     password: &str,
+    disable_auth: bool,
 ) -> Result<reqwest::Client, ExecutorError> {
     const OPENCODE_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
     const OPENCODE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
     reqwest::Client::builder()
-        .default_headers(build_default_headers(directory, password))
+        .default_headers(build_default_headers(
+            directory,
+            username,
+            password,
+            disable_auth,
+        ))
         .connect_timeout(OPENCODE_CONNECT_TIMEOUT)
         .timeout(OPENCODE_HTTP_TIMEOUT)
         .build()
