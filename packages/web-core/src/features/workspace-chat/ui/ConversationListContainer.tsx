@@ -1,29 +1,15 @@
-import {
-  DataWithScrollModifier,
-  type ListScrollLocation,
-  ScrollModifier,
-  VirtuosoMessageList,
-  VirtuosoMessageListLicense,
-  VirtuosoMessageListMethods,
-  VirtuosoMessageListProps,
-} from '@virtuoso.dev/message-list';
+import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso';
 import {
   forwardRef,
   useCallback,
   useEffect,
   useImperativeHandle,
-  useMemo,
   useRef,
   useState,
 } from 'react';
 import { SpinnerIcon } from '@phosphor-icons/react';
 
 import { cn } from '@/shared/lib/utils';
-import {
-  INITIAL_TOP_ITEM,
-  InitialDataScrollModifier,
-  ScrollToBottomModifier,
-} from '@/shared/lib/virtuoso-modifiers';
 import DisplayConversationEntry from './DisplayConversationEntry';
 import { ApprovalFormProvider } from '@/shared/hooks/ApprovalForm';
 import { useEntries } from '../model/contexts/EntriesContext';
@@ -68,25 +54,15 @@ interface MessageListContext {
   resetAction: UseResetProcessResult;
 }
 
-const AutoScrollToBottom: ScrollModifier = {
-  type: 'auto-scroll-to-bottom',
-  autoScroll: 'smooth',
-};
-
-const ScrollToTopOfLastItem: ScrollModifier = {
-  type: 'item-location',
-  location: {
-    index: 'LAST',
-    align: 'start',
-  },
-};
-
-const ItemContent: VirtuosoMessageListProps<
-  DisplayEntry,
-  MessageListContext
->['ItemContent'] = ({ data, context }) => {
-  const attempt = context?.attempt;
-  const resetAction = context?.resetAction;
+const ItemContent = ({
+  data,
+  context,
+}: {
+  data: DisplayEntry;
+  context: MessageListContext;
+}) => {
+  const attempt = context.attempt;
+  const resetAction = context.resetAction;
 
   // Handle aggregated tool groups (file_read, search, web_fetch)
   if (isAggregatedGroup(data)) {
@@ -160,42 +136,29 @@ const ItemContent: VirtuosoMessageListProps<
   return null;
 };
 
-const computeItemKey: VirtuosoMessageListProps<
-  DisplayEntry,
-  MessageListContext
->['computeItemKey'] = ({ data }) => `conv-${data.patchKey}`;
-
-const itemIdentity: VirtuosoMessageListProps<
-  DisplayEntry,
-  MessageListContext
->['itemIdentity'] = (item) => item.patchKey;
+type PendingScrollAction = 'initial' | 'plan' | 'running' | 'default' | null;
 
 export const ConversationList = forwardRef<
   ConversationListHandle,
   ConversationListProps
 >(function ConversationList({ attempt, onAtBottomChange }, ref) {
   const resetAction = useResetProcess();
-  const [channelData, setChannelData] =
-    useState<DataWithScrollModifier<DisplayEntry> | null>(null);
+  const [displayEntries, setDisplayEntries] = useState<Array<DisplayEntry>>([]);
   const [loading, setLoading] = useState(true);
+  const [pendingScrollAction, setPendingScrollAction] =
+    useState<PendingScrollAction>(null);
   const { setEntries, reset } = useEntries();
   const pendingUpdateRef = useRef<{
-    entries: PatchTypeWithKey[];
+    entries: Array<PatchTypeWithKey>;
     addType: AddEntryType;
     loading: boolean;
   } | null>(null);
   const debounceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const lastAtBottomRef = useRef(true);
-  const handleScroll = useCallback(
-    (location: ListScrollLocation) => {
-      if (location.isAtBottom !== lastAtBottomRef.current) {
-        lastAtBottomRef.current = location.isAtBottom;
-        onAtBottomChange?.(location.isAtBottom);
-      }
-    },
-    [onAtBottomChange]
-  );
+  const messageListRef = useRef<VirtuosoHandle | null>(null);
+  const isAtBottomRef = useRef(true);
+  const visibleStartIndexRef = useRef(0);
+  const previousLengthRef = useRef(0);
+  const loadingRef = useRef(true);
 
   // Get repos from workspace context to check if scripts are configured
   let repos: RepoWithTargetBranch[] = [];
@@ -244,7 +207,9 @@ export const ConversationList = forwardRef<
 
   useEffect(() => {
     setLoading(true);
-    setChannelData(null);
+    loadingRef.current = true;
+    setDisplayEntries([]);
+    setPendingScrollAction(null);
     reset();
   }, [attempt.id, reset]);
 
@@ -257,7 +222,7 @@ export const ConversationList = forwardRef<
   }, []);
 
   const onEntriesUpdated = (
-    newEntries: PatchTypeWithKey[],
+    newEntries: Array<PatchTypeWithKey>,
     addType: AddEntryType,
     newLoading: boolean
   ) => {
@@ -275,18 +240,16 @@ export const ConversationList = forwardRef<
       const pending = pendingUpdateRef.current;
       if (!pending) return;
 
-      let scrollModifier: ScrollModifier;
+      let nextScrollAction: PendingScrollAction;
 
-      if (loading) {
-        // First data load: purge estimated sizes and jump to bottom
-        scrollModifier = InitialDataScrollModifier;
+      if (loadingRef.current) {
+        nextScrollAction = 'initial';
       } else if (pending.addType === 'plan') {
-        scrollModifier = ScrollToTopOfLastItem;
+        nextScrollAction = 'plan';
       } else if (pending.addType === 'running') {
-        scrollModifier = AutoScrollToBottom;
+        nextScrollAction = 'running';
       } else {
-        // Historic/subsequent updates: scroll to bottom but keep measured sizes
-        scrollModifier = ScrollToBottomModifier;
+        nextScrollAction = 'default';
       }
 
       const aggregatedEntries = aggregateConsecutiveEntries(pending.entries);
@@ -306,10 +269,12 @@ export const ConversationList = forwardRef<
         return true;
       });
 
-      setChannelData({ data: filteredEntries, scrollModifier });
+      setDisplayEntries(filteredEntries);
+      setPendingScrollAction(nextScrollAction);
       setEntries(pending.entries);
 
-      if (loading) {
+      if (loadingRef.current) {
+        loadingRef.current = pending.loading;
         setLoading(pending.loading);
       }
     }, 100);
@@ -323,8 +288,7 @@ export const ConversationList = forwardRef<
   } = useConversationHistory({ attempt, onEntriesUpdated });
 
   // Determine if there are entries to show placeholders
-  const entries = channelData?.data ?? [];
-  const hasEntries = entries.length > 0;
+  const hasEntries = displayEntries.length > 0;
 
   // Show placeholders only if script not configured AND not already run AND first turn
   const showSetupPlaceholder =
@@ -336,48 +300,59 @@ export const ConversationList = forwardRef<
     hasEntries &&
     isFirstTurn;
 
-  const messageListRef = useRef<VirtuosoMessageListMethods | null>(null);
-  const messageListContext = useMemo(
-    () => ({
-      attempt,
-      onConfigureSetup: canConfigure ? handleConfigureSetup : undefined,
-      onConfigureCleanup: canConfigure ? handleConfigureCleanup : undefined,
-      showSetupPlaceholder,
-      showCleanupPlaceholder,
-      resetAction,
-    }),
-    [
-      attempt,
-      canConfigure,
-      handleConfigureSetup,
-      handleConfigureCleanup,
-      showSetupPlaceholder,
-      showCleanupPlaceholder,
-      resetAction,
-    ]
-  );
+  const messageListContext: MessageListContext = {
+    attempt,
+    onConfigureSetup: canConfigure ? handleConfigureSetup : undefined,
+    onConfigureCleanup: canConfigure ? handleConfigureCleanup : undefined,
+    showSetupPlaceholder,
+    showCleanupPlaceholder,
+    resetAction,
+  };
+
+  useEffect(() => {
+    if (!pendingScrollAction || displayEntries.length === 0) {
+      return;
+    }
+
+    const lastIndex = displayEntries.length - 1;
+    const scroll = () => {
+      if (!messageListRef.current) return;
+
+      if (pendingScrollAction === 'plan') {
+        messageListRef.current.scrollToIndex({
+          index: lastIndex,
+          align: 'start',
+          behavior: 'smooth',
+        });
+      } else if (
+        pendingScrollAction === 'initial' ||
+        pendingScrollAction === 'default' ||
+        (pendingScrollAction === 'running' && isAtBottomRef.current)
+      ) {
+        messageListRef.current.scrollToIndex({
+          index: lastIndex,
+          align: 'end',
+          behavior: pendingScrollAction === 'running' ? 'smooth' : 'auto',
+        });
+      }
+      setPendingScrollAction(null);
+    };
+
+    requestAnimationFrame(scroll);
+    previousLengthRef.current = displayEntries.length;
+  }, [displayEntries, pendingScrollAction]);
 
   // Expose scroll to previous user message functionality via ref
   useImperativeHandle(
     ref,
     () => ({
       scrollToPreviousUserMessage: () => {
-        const data = channelData?.data;
-        if (!data || !messageListRef.current) return;
-
-        // Get currently rendered items to find visible range
-        const rendered = messageListRef.current.data.getCurrentlyRendered();
-        if (!rendered.length) return;
-
-        // Find the index of the first visible item in the full data array
-        const firstVisibleKey = rendered[0]?.patchKey;
-        const firstVisibleIndex = data.findIndex(
-          (item) => item.patchKey === firstVisibleKey
-        );
+        if (!displayEntries.length || !messageListRef.current) return;
+        const firstVisibleIndex = Math.max(visibleStartIndexRef.current, 0);
 
         // Find all user message indices
-        const userMessageIndices: number[] = [];
-        data.forEach((item, index) => {
+        const userMessageIndices: Array<number> = [];
+        displayEntries.forEach((item, index) => {
           if (
             item.type === 'NORMALIZED_ENTRY' &&
             item.content.entry_type.type === 'user_message'
@@ -392,7 +367,7 @@ export const ConversationList = forwardRef<
           .find((idx) => idx < firstVisibleIndex);
 
         if (targetIndex !== undefined) {
-          messageListRef.current.scrollToItem({
+          messageListRef.current.scrollToIndex({
             index: targetIndex,
             align: 'start',
             behavior: 'smooth',
@@ -400,19 +375,19 @@ export const ConversationList = forwardRef<
         }
       },
       scrollToBottom: () => {
-        if (!messageListRef.current) return;
-        messageListRef.current.scrollToItem({
-          index: 'LAST',
+        if (!messageListRef.current || displayEntries.length === 0) return;
+        messageListRef.current.scrollToIndex({
+          index: displayEntries.length - 1,
           align: 'end',
           behavior: 'smooth',
         });
       },
     }),
-    [channelData]
+    [displayEntries]
   );
 
   // Determine if content is ready to show (has data or finished loading)
-  const hasContent = !loading || (channelData?.data?.length ?? 0) > 0;
+  const hasContent = !loading || displayEntries.length > 0;
 
   return (
     <ApprovalFormProvider>
@@ -427,45 +402,50 @@ export const ConversationList = forwardRef<
             <SpinnerIcon className="size-6 animate-spin text-low" />
           </div>
         )}
-        <VirtuosoMessageListLicense
-          licenseKey={import.meta.env.VITE_PUBLIC_REACT_VIRTUOSO_LICENSE_KEY}
-        >
-          <VirtuosoMessageList<DisplayEntry, MessageListContext>
-            ref={messageListRef}
-            className="h-full scrollbar-none"
-            data={channelData}
-            initialLocation={INITIAL_TOP_ITEM}
-            context={messageListContext}
-            computeItemKey={computeItemKey}
-            itemIdentity={itemIdentity}
-            ItemContent={ItemContent}
-            onScroll={handleScroll}
-            Header={({ context }) => (
+        <Virtuoso<DisplayEntry>
+          ref={messageListRef}
+          className="h-full scrollbar-none"
+          data={displayEntries}
+          computeItemKey={(_, item) => `conv-${item.patchKey}`}
+          atBottomStateChange={(isAtBottom) => {
+            if (isAtBottom !== isAtBottomRef.current) {
+              isAtBottomRef.current = isAtBottom;
+              onAtBottomChange?.(isAtBottom);
+            }
+          }}
+          rangeChanged={(range) => {
+            visibleStartIndexRef.current = range.startIndex;
+          }}
+          itemContent={(_, item) => (
+            <ItemContent data={item} context={messageListContext} />
+          )}
+          components={{
+            Header: () => (
               <div className="pt-2">
-                {context?.showSetupPlaceholder && (
+                {messageListContext.showSetupPlaceholder && (
                   <div className="my-base px-double">
                     <ChatScriptPlaceholder
                       type="setup"
-                      onConfigure={context.onConfigureSetup}
+                      onConfigure={messageListContext.onConfigureSetup}
                     />
                   </div>
                 )}
               </div>
-            )}
-            Footer={({ context }) => (
+            ),
+            Footer: () => (
               <div className="pb-2">
-                {context?.showCleanupPlaceholder && (
+                {messageListContext.showCleanupPlaceholder && (
                   <div className="my-base px-double">
                     <ChatScriptPlaceholder
                       type="cleanup"
-                      onConfigure={context.onConfigureCleanup}
+                      onConfigure={messageListContext.onConfigureCleanup}
                     />
                   </div>
                 )}
               </div>
-            )}
-          />
-        </VirtuosoMessageListLicense>
+            ),
+          }}
+        />
       </div>
     </ApprovalFormProvider>
   );

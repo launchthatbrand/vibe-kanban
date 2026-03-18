@@ -1,20 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import {
-  DataWithScrollModifier,
-  ScrollModifier,
-  VirtuosoMessageList,
-  VirtuosoMessageListLicense,
-  VirtuosoMessageListMethods,
-  VirtuosoMessageListProps,
-} from '@virtuoso.dev/message-list';
+import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso';
 import { WarningCircleIcon } from '@phosphor-icons/react/dist/ssr';
 import RawLogText from '@/shared/components/RawLogText';
-import {
-  INITIAL_TOP_ITEM,
-  InitialDataScrollModifier,
-  ScrollToBottomModifier as ScrollToLastItem,
-} from '@/shared/lib/virtuoso-modifiers';
 import type { PatchType } from 'shared/types';
 
 export type LogEntry = Extract<
@@ -23,10 +11,10 @@ export type LogEntry = Extract<
 >;
 
 export interface VirtualizedProcessLogsProps {
-  logs: LogEntry[];
+  logs: Array<LogEntry>;
   error: string | null;
   searchQuery: string;
-  matchIndices: number[];
+  matchIndices: Array<number>;
   currentMatchIndex: number;
 }
 
@@ -34,19 +22,17 @@ type LogEntryWithKey = LogEntry & { key: string; originalIndex: number };
 
 interface SearchContext {
   searchQuery: string;
-  matchIndices: number[];
+  matchIndices: Array<number>;
   currentMatchIndex: number;
 }
 
-const computeItemKey: VirtuosoMessageListProps<
-  LogEntryWithKey,
-  SearchContext
->['computeItemKey'] = ({ data }) => data.key;
-
-const ItemContent: VirtuosoMessageListProps<
-  LogEntryWithKey,
-  SearchContext
->['ItemContent'] = ({ data, context }) => {
+const ItemContent = ({
+  data,
+  context,
+}: {
+  data: LogEntryWithKey;
+  context: SearchContext;
+}) => {
   const isMatch = context.matchIndices.includes(data.originalIndex);
   const isCurrentMatch =
     context.matchIndices[context.currentMatchIndex] === data.originalIndex;
@@ -71,47 +57,49 @@ export function VirtualizedProcessLogs({
   currentMatchIndex,
 }: VirtualizedProcessLogsProps) {
   const { t } = useTranslation('tasks');
-  const [channelData, setChannelData] =
-    useState<DataWithScrollModifier<LogEntryWithKey> | null>(null);
-  const messageListRef = useRef<VirtuosoMessageListMethods<
-    LogEntryWithKey,
-    SearchContext
-  > | null>(null);
+  const [logRows, setLogRows] = useState<Array<LogEntryWithKey>>([]);
+  const listRef = useRef<VirtuosoHandle | null>(null);
   const hasInitializedRef = useRef(false);
   const prevCurrentMatchRef = useRef<number | undefined>(undefined);
   const isAtBottomRef = useRef(true);
+  const previousLengthRef = useRef(0);
 
   useEffect(() => {
-    const timeoutId = setTimeout(() => {
-      const logsWithKeys: LogEntryWithKey[] = logs.map((entry, index) => ({
-        ...entry,
-        key: `log-${index}`,
-        originalIndex: index,
-      }));
-
-      // Use InitialDataScrollModifier (with purgeItemSizes) only on the
-      // very first data load. For all subsequent updates, use ScrollToLastItem
-      // which always jumps to the end — unlike auto-scroll-to-bottom which
-      // only follows if the viewport is already at the bottom.
-      let scrollModifier: ScrollModifier | null = null;
-      if (!hasInitializedRef.current && logs.length > 0) {
-        hasInitializedRef.current = true;
-        scrollModifier = InitialDataScrollModifier;
-      } else if (isAtBottomRef.current) {
-        scrollModifier = ScrollToLastItem;
-      }
-
-      if (scrollModifier) {
-        setChannelData({ data: logsWithKeys, scrollModifier });
-      } else {
-        setChannelData({ data: logsWithKeys });
-      }
-    }, 100);
-
-    return () => clearTimeout(timeoutId);
+    const nextRows: Array<LogEntryWithKey> = logs.map((entry, index) => ({
+      ...entry,
+      key: `log-${index}`,
+      originalIndex: index,
+    }));
+    setLogRows(nextRows);
   }, [logs]);
 
-  // Scroll to current match when it changes
+  // Keep list pinned to the latest row only while the user remains at bottom.
+  useEffect(() => {
+    const hasNewRows = logRows.length > previousLengthRef.current;
+    if (logRows.length === 0) {
+      previousLengthRef.current = 0;
+      return;
+    }
+
+    const scrollToLastRow = () => {
+      listRef.current?.scrollToIndex({
+        index: logRows.length - 1,
+        align: 'end',
+        behavior: 'auto',
+      });
+    };
+
+    if (!hasInitializedRef.current) {
+      hasInitializedRef.current = true;
+      requestAnimationFrame(scrollToLastRow);
+    } else if (hasNewRows && isAtBottomRef.current) {
+      requestAnimationFrame(scrollToLastRow);
+    }
+
+    previousLengthRef.current = logRows.length;
+  }, [logRows]);
+
+  // Scroll to current match when it changes.
   useEffect(() => {
     if (
       matchIndices.length > 0 &&
@@ -119,7 +107,7 @@ export function VirtualizedProcessLogs({
       currentMatchIndex !== prevCurrentMatchRef.current
     ) {
       const logIndex = matchIndices[currentMatchIndex];
-      messageListRef.current?.scrollToItem({
+      listRef.current?.scrollToIndex({
         index: logIndex,
         align: 'center',
         behavior: 'smooth',
@@ -156,23 +144,17 @@ export function VirtualizedProcessLogs({
   };
 
   return (
-    <div className="virtuoso-license-wrapper h-full overflow-hidden">
-      <VirtuosoMessageListLicense
-        licenseKey={import.meta.env.VITE_PUBLIC_REACT_VIRTUOSO_LICENSE_KEY}
-      >
-        <VirtuosoMessageList<LogEntryWithKey, SearchContext>
-          ref={messageListRef}
-          className="h-full"
-          data={channelData}
-          context={context}
-          initialLocation={INITIAL_TOP_ITEM}
-          onScroll={(location) => {
-            isAtBottomRef.current = location.isAtBottom;
-          }}
-          computeItemKey={computeItemKey}
-          ItemContent={ItemContent}
-        />
-      </VirtuosoMessageListLicense>
+    <div className="h-full overflow-hidden">
+      <Virtuoso<LogEntryWithKey>
+        ref={listRef}
+        className="h-full"
+        data={logRows}
+        computeItemKey={(_, item) => item.key}
+        atBottomStateChange={(isAtBottom) => {
+          isAtBottomRef.current = isAtBottom;
+        }}
+        itemContent={(_, row) => <ItemContent data={row} context={context} />}
+      />
     </div>
   );
 }

@@ -12,8 +12,9 @@ use std::sync::OnceLock;
 use axum::{
     Router,
     body::Body,
-    extract::{FromRequestParts, Request, ws::WebSocketUpgrade},
+    extract::{FromRequestParts, Path, Request, ws::WebSocketUpgrade},
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
+    routing::any,
     response::{IntoResponse, Response},
 };
 use futures_util::{SinkExt, StreamExt};
@@ -330,6 +331,18 @@ async fn subdomain_proxy(request: Request) -> Response {
 
     let path = request.uri().path().trim_start_matches('/').to_string();
 
+    proxy_impl(target_port, path, request).await
+}
+
+async fn path_proxy_root(Path(target_port): Path<u16>, request: Request) -> Response {
+    proxy_impl(target_port, String::new(), request).await
+}
+
+async fn path_proxy_with_rest(
+    Path((target_port, rest)): Path<(u16, String)>,
+    request: Request,
+) -> Response {
+    let path = rest.trim_start_matches('/').to_string();
     proxy_impl(target_port, path, request).await
 }
 
@@ -763,6 +776,12 @@ where
     S: Clone + Send + Sync + 'static,
 {
     Router::new()
+        .route("/__vk_preview/{target_port}", any(path_proxy_root))
+        .route("/__vk_preview/{target_port}/", any(path_proxy_root))
+        .route(
+            "/__vk_preview/{target_port}/{*rest}",
+            any(path_proxy_with_rest),
+        )
         .fallback(subdomain_proxy)
         .layer(ValidateRequestHeaderLayer::custom(
             crate::middleware::validate_origin,

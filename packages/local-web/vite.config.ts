@@ -135,6 +135,11 @@ export default defineConfig({
         changeOrigin: true,
         ws: true,
       },
+      '/__vk_preview': {
+        target: `http://localhost:${process.env.PREVIEW_PROXY_PORT || '3009'}`,
+        changeOrigin: true,
+        ws: true,
+      },
     },
     fs: {
       allow: [path.resolve(__dirname, '.'), path.resolve(__dirname, '../..')],
