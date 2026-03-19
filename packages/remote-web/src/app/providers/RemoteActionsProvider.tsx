@@ -109,8 +109,9 @@ export function RemoteActionsProvider({
       currentWorkspaceId: null,
       containerRef: null,
       runningDevServers: [],
-      startDevServer: () => {
+      startDevServer: async () => {
         noOpSelection("Dev server actions");
+        return false;
       },
       stopDevServer: () => {
         noOpSelection("Dev server actions");

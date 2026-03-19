@@ -26,6 +26,11 @@ import { defineModal } from '@/shared/lib/modals';
 import { repoApi, workspacesApi } from '@/shared/lib/api';
 import { useLogStream } from '@/shared/hooks/useLogStream';
 import { useExecutionProcesses } from '@/shared/hooks/useExecutionProcesses';
+import {
+  parseDevServerScripts,
+  stringifyDevServerScripts,
+  type DevServerScriptEntry,
+} from '@/shared/lib/devServerScripts';
 import type { RepoWithTargetBranch, PatchType, UpdateRepo } from 'shared/types';
 
 export type ScriptType = 'setup' | 'cleanup' | 'dev_server' | 'archive';
@@ -56,6 +61,9 @@ const ScriptFixerDialogImpl = create<ScriptFixerDialogProps>(
     );
     const [script, setScript] = useState('');
     const [originalScript, setOriginalScript] = useState('');
+    const [devServerScripts, setDevServerScripts] = useState<DevServerScriptEntry[]>([]);
+    const [selectedDevServerScriptId, setSelectedDevServerScriptId] =
+      useState<string>('default');
     const [isLoadingRepo, setIsLoadingRepo] = useState(true);
     const [isSaving, setIsSaving] = useState(false);
     const [isTesting, setIsTesting] = useState(false);
@@ -135,7 +143,22 @@ const ScriptFixerDialogImpl = create<ScriptFixerDialogProps>(
                 ? (repo.cleanup_script ?? '')
                 : scriptType === 'archive'
                   ? (repo.archive_script ?? '')
-                  : (repo.dev_server_script ?? '');
+                  : '';
+
+          if (scriptType === 'dev_server') {
+            const scripts = parseDevServerScripts(repo.dev_server_script);
+            const normalizedScripts =
+              scripts.length > 0
+                ? scripts
+                : [{ id: 'default', name: 'Default', script: '' }];
+            const activeScript = normalizedScripts[0]?.script ?? '';
+            const activeScriptId = normalizedScripts[0]?.id ?? 'default';
+            setDevServerScripts(normalizedScripts);
+            setSelectedDevServerScriptId(activeScriptId);
+            setScript(activeScript);
+            setOriginalScript(activeScript);
+            return;
+          }
 
           setScript(scriptContent);
           setOriginalScript(scriptContent);
@@ -153,6 +176,16 @@ const ScriptFixerDialogImpl = create<ScriptFixerDialogProps>(
         cancelled = true;
       };
     }, [selectedRepoId, scriptType, t]);
+
+    useEffect(() => {
+      if (scriptType !== 'dev_server') return;
+      const selectedScript = devServerScripts.find(
+        (entry) => entry.id === selectedDevServerScriptId
+      );
+      const nextScript = selectedScript?.script ?? '';
+      setScript(nextScript);
+      setOriginalScript(nextScript);
+    }, [scriptType, selectedDevServerScriptId, devServerScripts]);
 
     const hasChanges = script !== originalScript;
 
@@ -176,6 +209,16 @@ const ScriptFixerDialogImpl = create<ScriptFixerDialogProps>(
       try {
         // Only send the field being edited - other fields will be preserved by the backend
         const scriptValue = script.trim() || null;
+        const devServerScriptValue =
+          scriptType === 'dev_server'
+            ? stringifyDevServerScripts(
+                devServerScripts.map((entry) =>
+                  entry.id === selectedDevServerScriptId
+                    ? { ...entry, script: scriptValue ?? '' }
+                    : entry
+                )
+              )
+            : null;
         const updateData: Partial<UpdateRepo> =
           scriptType === 'setup'
             ? { setup_script: scriptValue }
@@ -183,7 +226,7 @@ const ScriptFixerDialogImpl = create<ScriptFixerDialogProps>(
               ? { cleanup_script: scriptValue }
               : scriptType === 'archive'
                 ? { archive_script: scriptValue }
-                : { dev_server_script: scriptValue };
+                : { dev_server_script: devServerScriptValue };
 
         await repoApi.update(selectedRepoId, updateData as UpdateRepo);
 
@@ -200,7 +243,16 @@ const ScriptFixerDialogImpl = create<ScriptFixerDialogProps>(
       } finally {
         setIsSaving(false);
       }
-    }, [selectedRepoId, script, scriptType, queryClient, modal, t]);
+    }, [
+      selectedRepoId,
+      script,
+      scriptType,
+      queryClient,
+      modal,
+      t,
+      devServerScripts,
+      selectedDevServerScriptId,
+    ]);
 
     const handleSaveAndTest = useCallback(async () => {
       if (!selectedRepoId) return;
@@ -211,6 +263,16 @@ const ScriptFixerDialogImpl = create<ScriptFixerDialogProps>(
       try {
         // Only send the field being edited - other fields will be preserved by the backend
         const scriptValue = script.trim() || null;
+        const devServerScriptValue =
+          scriptType === 'dev_server'
+            ? stringifyDevServerScripts(
+                devServerScripts.map((entry) =>
+                  entry.id === selectedDevServerScriptId
+                    ? { ...entry, script: scriptValue ?? '' }
+                    : entry
+                )
+              )
+            : null;
         const updateData: Partial<UpdateRepo> =
           scriptType === 'setup'
             ? { setup_script: scriptValue }
@@ -218,7 +280,7 @@ const ScriptFixerDialogImpl = create<ScriptFixerDialogProps>(
               ? { cleanup_script: scriptValue }
               : scriptType === 'archive'
                 ? { archive_script: scriptValue }
-                : { dev_server_script: scriptValue };
+                : { dev_server_script: devServerScriptValue };
 
         await repoApi.update(selectedRepoId, updateData as UpdateRepo);
 
@@ -244,8 +306,12 @@ const ScriptFixerDialogImpl = create<ScriptFixerDialogProps>(
             setActiveSessionId(result.data.session_id);
           }
         } else {
-          // Start the dev server
-          const processes = await workspacesApi.startDevServer(workspaceId);
+          // Start the dev server with selected script for this repo
+          const processes = await workspacesApi.startDevServer(workspaceId, {
+            repo_script_ids: {
+              [selectedRepoId]: selectedDevServerScriptId,
+            },
+          });
           if (processes.length > 0) {
             setActiveSessionId(processes[0].session_id);
           }
@@ -260,7 +326,16 @@ const ScriptFixerDialogImpl = create<ScriptFixerDialogProps>(
       } finally {
         setIsTesting(false);
       }
-    }, [selectedRepoId, script, scriptType, workspaceId, queryClient, t]);
+    }, [
+      selectedRepoId,
+      script,
+      scriptType,
+      workspaceId,
+      queryClient,
+      t,
+      devServerScripts,
+      selectedDevServerScriptId,
+    ]);
 
     const dialogTitle =
       scriptType === 'setup'
@@ -310,6 +385,23 @@ const ScriptFixerDialogImpl = create<ScriptFixerDialogProps>(
             {/* Script editor */}
             <div className="flex flex-col gap-2 flex-1 min-h-0 min-w-0">
               <Label>{t('scriptFixer.scriptLabel')}</Label>
+              {scriptType === 'dev_server' && devServerScripts.length > 1 && (
+                <Select
+                  value={selectedDevServerScriptId}
+                  onValueChange={setSelectedDevServerScriptId}
+                >
+                  <SelectTrigger className="mb-1">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {devServerScripts.map((entry) => (
+                      <SelectItem key={entry.id} value={entry.id}>
+                        {entry.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
               <div className="bg-panel flex-1 min-h-[150px] max-h-[300px] overflow-auto border rounded-md min-w-0">
                 {isLoadingRepo ? (
                   <div className="h-full flex items-center justify-center">

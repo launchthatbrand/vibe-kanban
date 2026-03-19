@@ -16,6 +16,10 @@ interface UsePreviewDevServerOptions {
   onStopError?: (err: unknown) => void;
 }
 
+interface StartDevServerOptions {
+  repoScriptIds?: Record<string, string>;
+}
+
 export function usePreviewDevServer(
   workspaceId: string | undefined,
   options?: UsePreviewDevServerOptions
@@ -38,9 +42,11 @@ export function usePreviewDevServer(
 
   const startMutation = useMutation({
     mutationKey: ['startDevServer', workspaceId],
-    mutationFn: async () => {
+    mutationFn: async (startOptions?: StartDevServerOptions) => {
       if (!workspaceId) return;
-      await workspacesApi.startDevServer(workspaceId);
+      await workspacesApi.startDevServer(workspaceId, {
+        repo_script_ids: startOptions?.repoScriptIds,
+      });
     },
     onSuccess: async () => {
       await queryClient.invalidateQueries({
@@ -84,7 +90,10 @@ export function usePreviewDevServer(
   });
 
   return {
-    start: startMutation.mutate,
+    start: (startOptions?: StartDevServerOptions) =>
+      startMutation.mutate(startOptions),
+    startAsync: (startOptions?: StartDevServerOptions) =>
+      startMutation.mutateAsync(startOptions),
     stop: stopMutation.mutate,
     isStarting: startMutation.isPending,
     isStopping: stopMutation.isPending,

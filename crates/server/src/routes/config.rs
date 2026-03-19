@@ -97,6 +97,10 @@ pub struct UserSystemInfo {
     pub capabilities: HashMap<String, Vec<BaseAgentCapability>>,
     pub shared_api_base: Option<String>,
     pub preview_proxy_port: Option<u16>,
+    pub preview_routing_mode: Option<String>,
+    pub preview_path_prefix: Option<String>,
+    pub preview_public_base_url: Option<String>,
+    pub preview_host_suffix: Option<String>,
 }
 
 // TODO: update frontend, BE schema has changed, this replaces GET /config and /config/constants
@@ -131,6 +135,10 @@ async fn get_user_system_info(
         },
         shared_api_base: deployment.shared_api_base(),
         preview_proxy_port: crate::preview_proxy::get_proxy_port(),
+        preview_routing_mode: Some(crate::preview_proxy::get_preview_routing_mode()),
+        preview_path_prefix: Some(crate::preview_proxy::get_preview_path_prefix()),
+        preview_public_base_url: crate::preview_proxy::get_preview_public_base_url(),
+        preview_host_suffix: crate::preview_proxy::get_preview_host_suffix(),
     };
 
     ResponseJson(ApiResponse::success(user_system_info))

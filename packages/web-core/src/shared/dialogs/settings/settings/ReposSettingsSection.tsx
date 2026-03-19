@@ -2,7 +2,14 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { isEqual } from 'lodash';
-import { GitBranchIcon, PlusIcon, SpinnerIcon } from '@phosphor-icons/react';
+import {
+  ArrowDownIcon,
+  ArrowUpIcon,
+  GitBranchIcon,
+  PlusIcon,
+  SpinnerIcon,
+  TrashIcon,
+} from '@phosphor-icons/react';
 import { Loader2 } from 'lucide-react';
 import { create, useModal } from '@ebay/nice-modal-react';
 import { useRepoBranches } from '@/shared/hooks/useRepoBranches';
@@ -10,6 +17,11 @@ import { useScriptPlaceholders } from '@/shared/hooks/useScriptPlaceholders';
 import { useAllOrganizationProjects } from '@/shared/hooks/useAllOrganizationProjects';
 import { getProjectRepoDefaults } from '@/shared/hooks/useProjectRepoDefaults';
 import { repoApi, ApiError } from '@/shared/lib/api';
+import {
+  type DevServerScriptEntry,
+  parseDevServerScripts,
+  stringifyDevServerScripts,
+} from '@/shared/lib/devServerScripts';
 import { defineModal } from '@/shared/lib/modals';
 import type { Repo, UpdateRepo } from 'shared/types';
 import { SearchableDropdownContainer } from '@/shared/components/ui-new/containers/SearchableDropdownContainer';
@@ -42,6 +54,8 @@ import {
 
 interface RepoScriptsFormState {
   display_name: string;
+  is_monorepo: boolean;
+  apps_root: string;
   default_working_dir: string;
   default_target_branch: string;
   setup_script: string;
@@ -49,12 +63,15 @@ interface RepoScriptsFormState {
   cleanup_script: string;
   archive_script: string;
   copy_files: string;
-  dev_server_script: string;
+  dev_server_scripts: DevServerScriptEntry[];
 }
 
 function repoToFormState(repo: Repo): RepoScriptsFormState {
+  const parsedDevScripts = parseDevServerScripts(repo.dev_server_script);
   return {
     display_name: repo.display_name,
+    is_monorepo: repo.is_monorepo ?? false,
+    apps_root: repo.apps_root ?? 'apps',
     default_working_dir: repo.default_working_dir ?? '',
     default_target_branch: repo.default_target_branch ?? '',
     setup_script: repo.setup_script ?? '',
@@ -62,7 +79,10 @@ function repoToFormState(repo: Repo): RepoScriptsFormState {
     cleanup_script: repo.cleanup_script ?? '',
     archive_script: repo.archive_script ?? '',
     copy_files: repo.copy_files ?? '',
-    dev_server_script: repo.dev_server_script ?? '',
+    dev_server_scripts:
+      parsedDevScripts.length > 0
+        ? parsedDevScripts
+        : [{ id: 'default', name: 'Default', script: '' }],
   };
 }
 
@@ -169,6 +189,7 @@ export function ReposSettingsSection({
   // Form state
   const [draft, setDraft] = useState<RepoScriptsFormState | null>(null);
   const [saving, setSaving] = useState(false);
+  const [discoveringApps, setDiscoveringApps] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
 
@@ -320,6 +341,8 @@ export function ReposSettingsSection({
     try {
       const updateData: UpdateRepo = {
         display_name: draft.display_name.trim() || null,
+        is_monorepo: draft.is_monorepo,
+        apps_root: draft.apps_root.trim() || null,
         default_working_dir: draft.default_working_dir.trim() || null,
         default_target_branch: draft.default_target_branch.trim() || null,
         setup_script: draft.setup_script.trim() || null,
@@ -327,7 +350,7 @@ export function ReposSettingsSection({
         archive_script: draft.archive_script.trim() || null,
         copy_files: draft.copy_files.trim() || null,
         parallel_setup_script: draft.parallel_setup_script,
-        dev_server_script: draft.dev_server_script.trim() || null,
+        dev_server_script: stringifyDevServerScripts(draft.dev_server_scripts),
       };
 
       const updatedRepo = await repoApi.update(selectedRepo.id, updateData);
@@ -356,6 +379,91 @@ export function ReposSettingsSection({
     setDraft((prev) => {
       if (!prev) return prev;
       return { ...prev, ...updates };
+    });
+  };
+
+  const handleDiscoverMonorepoApps = async () => {
+    if (!selectedRepo || !draft) return;
+    setDiscoveringApps(true);
+    setError(null);
+    try {
+      const discoveredApps = await repoApi.discoverMonorepoApps(
+        selectedRepo.id,
+        draft.apps_root.trim() || undefined
+      );
+      if (discoveredApps.length === 0) {
+        setError('No apps with a dev script found in the configured apps folder.');
+        return;
+      }
+
+      updateDraft({
+        dev_server_scripts: discoveredApps.map((app) => ({
+          id: app.id,
+          name: app.name,
+          script: app.script,
+        })),
+      });
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : 'Failed to discover monorepo apps.'
+      );
+    } finally {
+      setDiscoveringApps(false);
+    }
+  };
+
+  const updateDevServerScript = (
+    index: number,
+    updates: Partial<DevServerScriptEntry>
+  ) => {
+    setDraft((prev) => {
+      if (!prev) return prev;
+      const nextScripts = [...prev.dev_server_scripts];
+      if (!nextScripts[index]) return prev;
+      nextScripts[index] = { ...nextScripts[index], ...updates };
+      return { ...prev, dev_server_scripts: nextScripts };
+    });
+  };
+
+  const addDevServerScript = () => {
+    setDraft((prev) => {
+      if (!prev) return prev;
+      const nextIndex = prev.dev_server_scripts.length + 1;
+      return {
+        ...prev,
+        dev_server_scripts: [
+          ...prev.dev_server_scripts,
+          {
+            id: `script-${nextIndex}`,
+            name: `Script ${nextIndex}`,
+            script: '',
+          },
+        ],
+      };
+    });
+  };
+
+  const removeDevServerScript = (index: number) => {
+    setDraft((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        dev_server_scripts: prev.dev_server_scripts.filter((_, i) => i !== index),
+      };
+    });
+  };
+
+  const moveDevServerScript = (index: number, direction: -1 | 1) => {
+    setDraft((prev) => {
+      if (!prev) return prev;
+      const nextIndex = index + direction;
+      if (nextIndex < 0 || nextIndex >= prev.dev_server_scripts.length) return prev;
+
+      const scripts = [...prev.dev_server_scripts];
+      const current = scripts[index];
+      scripts[index] = scripts[nextIndex];
+      scripts[nextIndex] = current;
+      return { ...prev, dev_server_scripts: scripts };
     });
   };
 
@@ -490,6 +598,27 @@ export function ReposSettingsSection({
               />
             </SettingsField>
 
+            <SettingsCheckbox
+              id="repo-is-monorepo"
+              label="Monorepo repository"
+              description="Enable monorepo app discovery and app-level dev server selection."
+              checked={draft.is_monorepo}
+              onChange={(checked) => updateDraft({ is_monorepo: checked })}
+            />
+
+            {draft.is_monorepo && (
+              <SettingsField
+                label="Apps folder"
+                description="Relative path from repository root (example: apps)."
+              >
+                <SettingsInput
+                  value={draft.apps_root}
+                  onChange={(value) => updateDraft({ apps_root: value })}
+                  placeholder="apps"
+                />
+              </SettingsField>
+            )}
+
             <SettingsField
               label={t('settings.repos.general.defaultTargetBranch.label')}
               description={t(
@@ -604,12 +733,75 @@ export function ReposSettingsSection({
               label={t('settings.repos.scripts.devServer.label')}
               description={t('settings.repos.scripts.devServer.helper')}
             >
-              <SettingsTextarea
-                value={draft.dev_server_script}
-                onChange={(value) => updateDraft({ dev_server_script: value })}
-                placeholder={placeholders.dev}
-                monospace
-              />
+              <div className="flex flex-col gap-3">
+                {draft.is_monorepo && (
+                  <div className="flex items-center justify-between gap-2 rounded-md border border-border p-2 bg-secondary/30">
+                    <p className="text-sm text-low">
+                      Auto-generate scripts from apps in `{draft.apps_root || 'apps'}`.
+                    </p>
+                    <Button
+                      variant="outline"
+                      onClick={handleDiscoverMonorepoApps}
+                      disabled={discoveringApps}
+                    >
+                      {discoveringApps ? 'Detecting...' : 'Detect apps'}
+                    </Button>
+                  </div>
+                )}
+                {draft.dev_server_scripts.map((entry, index) => (
+                  <div
+                    key={entry.id || `script-${index}`}
+                    className="rounded-md border border-border p-3 bg-panel flex flex-col gap-2"
+                  >
+                    <div className="flex items-center gap-2">
+                      <SettingsInput
+                        value={entry.name}
+                        onChange={(value) =>
+                          updateDevServerScript(index, { name: value })
+                        }
+                        placeholder={`Script ${index + 1}`}
+                      />
+                      <Button
+                        variant="outline"
+                        onClick={() => moveDevServerScript(index, -1)}
+                        disabled={index === 0}
+                        size="icon"
+                      >
+                        <ArrowUpIcon className="size-icon-sm" weight="bold" />
+                      </Button>
+                      <Button
+                        variant="outline"
+                        onClick={() => moveDevServerScript(index, 1)}
+                        disabled={index === draft.dev_server_scripts.length - 1}
+                        size="icon"
+                      >
+                        <ArrowDownIcon className="size-icon-sm" weight="bold" />
+                      </Button>
+                      <Button
+                        variant="outline"
+                        onClick={() => removeDevServerScript(index)}
+                        size="icon"
+                      >
+                        <TrashIcon className="size-icon-sm" weight="bold" />
+                      </Button>
+                    </div>
+
+                    <SettingsTextarea
+                      value={entry.script}
+                      onChange={(value) =>
+                        updateDevServerScript(index, { script: value })
+                      }
+                      placeholder={placeholders.dev}
+                      monospace
+                    />
+                  </div>
+                ))}
+
+                <Button variant="outline" onClick={addDevServerScript}>
+                  <PlusIcon className="size-icon-sm" weight="bold" />
+                  Add dev server script
+                </Button>
+              </div>
             </SettingsField>
 
             <SettingsField

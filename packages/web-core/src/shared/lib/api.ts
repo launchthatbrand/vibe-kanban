@@ -118,6 +118,13 @@ export class ApiError<E = unknown> extends Error {
   }
 }
 
+export interface MonorepoApp {
+  id: string;
+  name: string;
+  relative_path: string;
+  script: string;
+}
+
 const makeRequest = async (url: string, options: RequestInit = {}) => {
   const headers = new Headers(options.headers ?? {});
   if (!headers.has('Content-Type')) {
@@ -638,11 +645,15 @@ export const workspacesApi = {
     return handleApiResponseAsResult<AttachPrResponse, PrError>(response);
   },
 
-  startDevServer: async (workspaceId: string): Promise<ExecutionProcess[]> => {
+  startDevServer: async (
+    workspaceId: string,
+    data?: { repo_script_ids?: Record<string, string> }
+  ): Promise<ExecutionProcess[]> => {
     const response = await makeRequest(
       `/api/workspaces/${workspaceId}/execution/dev-server/start`,
       {
         method: 'POST',
+        body: JSON.stringify(data ?? {}),
       }
     );
     return handleApiResponse<ExecutionProcess[]>(response);
@@ -884,6 +895,21 @@ export const repoApi = {
   listRemotes: async (repoId: string): Promise<GitRemote[]> => {
     const response = await makeRequest(`/api/repos/${repoId}/remotes`);
     return handleApiResponse<GitRemote[]>(response);
+  },
+
+  discoverMonorepoApps: async (
+    repoId: string,
+    appsRoot?: string
+  ): Promise<MonorepoApp[]> => {
+    const params = new URLSearchParams();
+    if (appsRoot && appsRoot.trim()) {
+      params.set('apps_root', appsRoot.trim());
+    }
+    const query = params.toString();
+    const response = await makeRequest(
+      `/api/repos/${repoId}/monorepo/apps${query ? `?${query}` : ''}`
+    );
+    return handleApiResponse<MonorepoApp[]>(response);
   },
 };
 

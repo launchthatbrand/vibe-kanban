@@ -16,6 +16,10 @@ interface UseDevServerOptions {
   onStopError?: (err: unknown) => void;
 }
 
+interface StartDevServerOptions {
+  repoScriptIds?: Record<string, string>;
+}
+
 export function useDevServer(
   workspaceId: string | undefined,
   options?: UseDevServerOptions
@@ -48,9 +52,11 @@ export function useDevServer(
 
   const startMutation = useMutation({
     mutationKey: ['startDevServer', workspaceId],
-    mutationFn: async () => {
+    mutationFn: async (startOptions?: StartDevServerOptions) => {
       if (!workspaceId) return;
-      await workspacesApi.startDevServer(workspaceId);
+      await workspacesApi.startDevServer(workspaceId, {
+        repo_script_ids: startOptions?.repoScriptIds,
+      });
     },
     onMutate: () => {
       setPendingStart(true);
@@ -99,7 +105,10 @@ export function useDevServer(
   });
 
   return {
-    start: startMutation.mutate,
+    start: (startOptions?: StartDevServerOptions) =>
+      startMutation.mutate(startOptions),
+    startAsync: (startOptions?: StartDevServerOptions) =>
+      startMutation.mutateAsync(startOptions),
     stop: stopMutation.mutate,
     isStarting: startMutation.isPending || pendingStart,
     isStopping: stopMutation.isPending,

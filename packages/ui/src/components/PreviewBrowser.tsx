@@ -85,6 +85,8 @@ interface PreviewBrowserProps {
   onToggleInspectMode: () => void;
   isErudaVisible: boolean;
   onToggleEruda: () => void;
+  showProxyUrlInToolbar?: boolean;
+  onToggleShowProxyUrlInToolbar?: () => void;
   onIframeLoad?: () => void;
   isMobile?: boolean;
   mobileUrlExpanded?: boolean;
@@ -131,6 +133,8 @@ export function PreviewBrowser({
   onToggleInspectMode,
   isErudaVisible,
   onToggleEruda,
+  showProxyUrlInToolbar,
+  onToggleShowProxyUrlInToolbar,
   onIframeLoad,
   isMobile,
   mobileUrlExpanded,
@@ -323,6 +327,21 @@ export function PreviewBrowser({
                   disabled={!isServerRunning}
                   aria-label={t('preview.toolbar.toggleDevTools')}
                   title={t('preview.toolbar.toggleDevTools')}
+                />
+              </IconButtonGroup>
+
+              <IconButtonGroup>
+                <IconButtonGroupItem
+                  icon={GlobeIcon}
+                  onClick={onToggleShowProxyUrlInToolbar}
+                  active={showProxyUrlInToolbar}
+                  disabled={!isServerRunning}
+                  aria-label="Toggle preview URL display mode"
+                  title={
+                    showProxyUrlInToolbar
+                      ? 'Showing proxied/public URL'
+                      : 'Showing localhost URL'
+                  }
                 />
               </IconButtonGroup>
 

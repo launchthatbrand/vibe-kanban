@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Component, PathBuf};
 
 use axum::{
     Router,
@@ -12,6 +12,7 @@ use deployment::Deployment;
 use git::{GitBranch, GitRemote};
 use git_host::{GitHostError, GitHostProvider, GitHostService, OpenPrInfo, ProviderKind};
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use services::services::file_search::SearchQuery;
 use ts_rs::TS;
 use utils::response::ApiResponse;
@@ -45,6 +46,116 @@ pub struct InitRepoRequest {
 #[derive(Debug, Deserialize, TS)]
 pub struct BatchRepoRequest {
     pub ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Serialize, TS)]
+pub struct MonorepoApp {
+    pub id: String,
+    pub name: String,
+    pub relative_path: String,
+    pub script: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DiscoverMonorepoAppsQuery {
+    pub apps_root: Option<String>,
+}
+
+fn validate_relative_apps_root(input: &str) -> Option<PathBuf> {
+    let candidate = PathBuf::from(input.trim());
+    if candidate.as_os_str().is_empty() || candidate.is_absolute() {
+        return None;
+    }
+    if candidate
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return None;
+    }
+    Some(candidate)
+}
+
+pub async fn discover_monorepo_apps(
+    State(deployment): State<DeploymentImpl>,
+    Path(repo_id): Path<Uuid>,
+    Query(query): Query<DiscoverMonorepoAppsQuery>,
+) -> Result<ResponseJson<ApiResponse<Vec<MonorepoApp>>>, ApiError> {
+    let repo = deployment
+        .repo()
+        .get_by_id(&deployment.db().pool, repo_id)
+        .await?;
+
+    let configured_apps_root = query
+        .apps_root
+        .as_deref()
+        .or(repo.apps_root.as_deref())
+        .unwrap_or("apps");
+    let relative_apps_root = validate_relative_apps_root(configured_apps_root)
+        .unwrap_or_else(|| PathBuf::from("apps"));
+    let apps_dir = repo.path.join(&relative_apps_root);
+    if !apps_dir.exists() || !apps_dir.is_dir() {
+        return Ok(ResponseJson(ApiResponse::success(Vec::new())));
+    }
+
+    let mut apps = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&apps_dir) {
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+
+            let app_dir = entry.path();
+            let package_json_path = app_dir.join("package.json");
+            if !package_json_path.exists() {
+                continue;
+            }
+
+            let Ok(raw_package_json) = std::fs::read_to_string(&package_json_path) else {
+                continue;
+            };
+            let Ok(parsed_package_json) = serde_json::from_str::<JsonValue>(&raw_package_json)
+            else {
+                continue;
+            };
+
+            let has_dev_script = parsed_package_json
+                .get("scripts")
+                .and_then(|scripts| scripts.get("dev"))
+                .and_then(|value| value.as_str())
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false);
+            if !has_dev_script {
+                continue;
+            }
+
+            let fallback_name = entry.file_name().to_string_lossy().to_string();
+            let app_name = parsed_package_json
+                .get("name")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.trim().is_empty())
+                .map(ToOwned::to_owned)
+                .unwrap_or(fallback_name);
+
+            let relative_path = relative_apps_root.join(entry.file_name());
+            let relative_path_string = relative_path.to_string_lossy().to_string();
+
+            apps.push(MonorepoApp {
+                id: app_name
+                    .to_lowercase()
+                    .replace(|c: char| !c.is_ascii_alphanumeric(), "-"),
+                name: app_name,
+                relative_path: relative_path_string.clone(),
+                script: format!("cd {} && pnpm dev", relative_path_string),
+            });
+        }
+    }
+
+    apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+    Ok(ResponseJson(ApiResponse::success(apps)))
 }
 
 pub async fn register_repo(
@@ -337,6 +448,7 @@ pub fn router() -> Router<DeploymentImpl> {
         )
         .route("/repos/{repo_id}/branches", get(get_repo_branches))
         .route("/repos/{repo_id}/remotes", get(get_repo_remotes))
+        .route("/repos/{repo_id}/monorepo/apps", get(discover_monorepo_apps))
         .route("/repos/{repo_id}/prs", get(list_open_prs))
         .route("/repos/{repo_id}/search", get(search_repo))
         .route("/repos/{repo_id}/open-editor", post(open_repo_in_editor))

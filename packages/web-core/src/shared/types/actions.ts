@@ -61,7 +61,7 @@ export interface ActionExecutorContext {
   currentWorkspaceId: string | null;
   containerRef: string | null;
   runningDevServers: ExecutionProcess[];
-  startDevServer: () => void;
+  startDevServer: () => Promise<boolean>;
   stopDevServer: () => void;
   // Logs panel state
   currentLogs: LogEntry[] | null;

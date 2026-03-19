@@ -45,6 +45,8 @@ pub struct Repo {
     pub copy_files: Option<String>,
     pub parallel_setup_script: bool,
     pub dev_server_script: Option<String>,
+    pub is_monorepo: bool,
+    pub apps_root: Option<String>,
     pub default_target_branch: Option<String>,
     pub default_working_dir: Option<String>,
     #[ts(type = "Date")]
@@ -116,6 +118,22 @@ pub struct UpdateRepo {
         skip_serializing_if = "Option::is_none",
         with = "double_option"
     )]
+    #[ts(optional, type = "boolean | null")]
+    pub is_monorepo: Option<Option<bool>>,
+
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "double_option"
+    )]
+    #[ts(optional, type = "string | null")]
+    pub apps_root: Option<Option<String>>,
+
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "double_option"
+    )]
     #[ts(optional, type = "string | null")]
     pub default_target_branch: Option<Option<String>>,
 
@@ -144,6 +162,8 @@ impl Repo {
                       copy_files,
                       parallel_setup_script as "parallel_setup_script!: bool",
                       dev_server_script,
+                      is_monorepo as "is_monorepo!: bool",
+                      apps_root,
                       default_target_branch,
                       default_working_dir,
                       created_at as "created_at!: DateTime<Utc>",
@@ -185,6 +205,8 @@ impl Repo {
                       copy_files,
                       parallel_setup_script as "parallel_setup_script!: bool",
                       dev_server_script,
+                      is_monorepo as "is_monorepo!: bool",
+                      apps_root,
                       default_target_branch,
                       default_working_dir,
                       created_at as "created_at!: DateTime<Utc>",
@@ -243,6 +265,8 @@ impl Repo {
                          copy_files,
                          parallel_setup_script as "parallel_setup_script!: bool",
                          dev_server_script,
+                         is_monorepo as "is_monorepo!: bool",
+                         apps_root,
                          default_target_branch,
                          default_working_dir,
                          created_at as "created_at!: DateTime<Utc>",
@@ -280,6 +304,8 @@ impl Repo {
                       copy_files,
                       parallel_setup_script as "parallel_setup_script!: bool",
                       dev_server_script,
+                      is_monorepo as "is_monorepo!: bool",
+                      apps_root,
                       default_target_branch,
                       default_working_dir,
                       created_at as "created_at!: DateTime<Utc>",
@@ -306,6 +332,8 @@ impl Repo {
                       r.copy_files,
                       r.parallel_setup_script as "parallel_setup_script!: bool",
                       r.dev_server_script,
+                      r.is_monorepo as "is_monorepo!: bool",
+                      r.apps_root,
                       r.default_target_branch,
                       r.default_working_dir,
                       r.created_at as "created_at!: DateTime<Utc>",
@@ -392,6 +420,14 @@ impl Repo {
             None => existing.dev_server_script,
             Some(v) => v.clone(),
         };
+        let is_monorepo = match &payload.is_monorepo {
+            None => existing.is_monorepo,
+            Some(v) => v.unwrap_or(false),
+        };
+        let apps_root = match &payload.apps_root {
+            None => existing.apps_root,
+            Some(v) => v.clone(),
+        };
         let default_target_branch = match &payload.default_target_branch {
             None => existing.default_target_branch,
             Some(v) => v.clone(),
@@ -411,10 +447,12 @@ impl Repo {
                    copy_files = $5,
                    parallel_setup_script = $6,
                    dev_server_script = $7,
-                   default_target_branch = $8,
-                   default_working_dir = $9,
+                   is_monorepo = $8,
+                   apps_root = $9,
+                   default_target_branch = $10,
+                   default_working_dir = $11,
                    updated_at = datetime('now', 'subsec')
-               WHERE id = $10
+               WHERE id = $12
                RETURNING id as "id!: Uuid",
                          path,
                          name,
@@ -425,6 +463,8 @@ impl Repo {
                          copy_files,
                          parallel_setup_script as "parallel_setup_script!: bool",
                          dev_server_script,
+                         is_monorepo as "is_monorepo!: bool",
+                         apps_root,
                          default_target_branch,
                          default_working_dir,
                          created_at as "created_at!: DateTime<Utc>",
@@ -436,6 +476,8 @@ impl Repo {
             copy_files,
             parallel_setup_script,
             dev_server_script,
+            is_monorepo,
+            apps_root,
             default_target_branch,
             default_working_dir,
             id

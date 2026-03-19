@@ -1,4 +1,11 @@
-use axum::{Extension, Router, extract::State, response::Json as ResponseJson, routing::post};
+use std::collections::HashMap;
+
+use axum::{
+    Extension, Router,
+    extract::{Json as RequestJson, State},
+    response::Json as ResponseJson,
+    routing::post,
+};
 use db::models::{
     execution_process::{ExecutionProcess, ExecutionProcessRunReason, ExecutionProcessStatus},
     session::{CreateSession, Session},
@@ -11,6 +18,7 @@ use executors::actions::{
     script::{ScriptContext, ScriptRequest, ScriptRequestLanguage},
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use services::services::container::ContainerService;
 use ts_rs::TS;
 use utils::response::ApiResponse;
@@ -26,6 +34,98 @@ pub enum RunScriptError {
     ProcessAlreadyRunning,
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct StartDevServerRequest {
+    #[serde(default)]
+    pub repo_script_ids: HashMap<Uuid, String>,
+}
+
+#[derive(Debug)]
+struct DevServerScriptEntry {
+    id: String,
+    script: String,
+}
+
+fn parse_repo_dev_server_scripts(raw: &str) -> Vec<DevServerScriptEntry> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let parsed = serde_json::from_str::<JsonValue>(trimmed);
+    if let Ok(json) = parsed {
+        if let Some(array) = json.as_array() {
+            let scripts = array
+                .iter()
+                .enumerate()
+                .filter_map(|(index, item)| {
+                    let script = item.get("script")?.as_str()?.trim();
+                    if script.is_empty() {
+                        return None;
+                    }
+                    let id = item
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .filter(|value| !value.trim().is_empty())
+                        .map(ToOwned::to_owned)
+                        .unwrap_or_else(|| format!("script-{}", index + 1));
+                    Some(DevServerScriptEntry {
+                        id,
+                        script: script.to_string(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            if !scripts.is_empty() {
+                return scripts;
+            }
+        }
+
+        if let Some(obj) = json.as_object() {
+            let maybe_entries = obj.get("scripts").or_else(|| obj.get("entries"));
+            if let Some(entries) = maybe_entries.and_then(|value| value.as_array()) {
+                let scripts = entries
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, item)| {
+                        let script = item.get("script")?.as_str()?.trim();
+                        if script.is_empty() {
+                            return None;
+                        }
+                        let id = item
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .filter(|value| !value.trim().is_empty())
+                            .map(ToOwned::to_owned)
+                            .unwrap_or_else(|| format!("script-{}", index + 1));
+                        Some(DevServerScriptEntry {
+                            id,
+                            script: script.to_string(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if !scripts.is_empty() {
+                    return scripts;
+                }
+            }
+
+            if let Some(script) = obj.get("script").and_then(|value| value.as_str()) {
+                let script = script.trim();
+                if !script.is_empty() {
+                    return vec![DevServerScriptEntry {
+                        id: "default".to_string(),
+                        script: script.to_string(),
+                    }];
+                }
+            }
+        }
+    }
+
+    vec![DevServerScriptEntry {
+        id: "default".to_string(),
+        script: trimmed.to_string(),
+    }]
+}
+
 pub fn router() -> Router<DeploymentImpl> {
     Router::new()
         .route("/dev-server/start", post(start_dev_server))
@@ -38,6 +138,7 @@ pub fn router() -> Router<DeploymentImpl> {
 pub async fn start_dev_server(
     Extension(workspace): Extension<Workspace>,
     State(deployment): State<DeploymentImpl>,
+    RequestJson(payload): RequestJson<Option<StartDevServerRequest>>,
 ) -> Result<ResponseJson<ApiResponse<Vec<ExecutionProcess>>>, ApiError> {
     let pool = &deployment.db().pool;
 
@@ -73,9 +174,30 @@ pub async fn start_dev_server(
     }
 
     let repos = WorkspaceRepo::find_repos_for_workspace(pool, workspace.id).await?;
+    let script_selections = payload.unwrap_or_default().repo_script_ids;
+
     let repos_with_dev_script: Vec<_> = repos
         .iter()
-        .filter(|r| r.dev_server_script.as_ref().is_some_and(|s| !s.is_empty()))
+        .filter_map(|repo| {
+            let raw = repo.dev_server_script.as_ref()?;
+            let parsed = parse_repo_dev_server_scripts(raw);
+            if parsed.is_empty() {
+                return None;
+            }
+
+            let selected_id = script_selections.get(&repo.id);
+            let selected_script = if let Some(script_id) = selected_id {
+                parsed
+                    .iter()
+                    .find(|entry| &entry.id == script_id)
+                    .map(|entry| entry.script.clone())
+                    .or_else(|| parsed.first().map(|entry| entry.script.clone()))
+            } else {
+                parsed.first().map(|entry| entry.script.clone())
+            };
+
+            selected_script.map(|script| (repo, script))
+        })
         .collect();
 
     if repos_with_dev_script.is_empty() {
@@ -101,10 +223,10 @@ pub async fn start_dev_server(
     };
 
     let mut execution_processes = Vec::new();
-    for repo in repos_with_dev_script {
+    for (repo, selected_script) in repos_with_dev_script {
         let executor_action = ExecutorAction::new(
             ExecutorActionType::ScriptRequest(ScriptRequest {
-                script: repo.dev_server_script.clone().unwrap(),
+                script: selected_script,
                 language: ScriptRequestLanguage::Bash,
                 context: ScriptContext::DevServer,
                 working_dir: Some(repo.name.clone()),

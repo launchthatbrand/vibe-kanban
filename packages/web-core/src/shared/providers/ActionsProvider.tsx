@@ -7,7 +7,7 @@ import {
 } from 'react';
 import { useParams } from '@tanstack/react-router';
 import { useQueryClient } from '@tanstack/react-query';
-import type { Workspace } from 'shared/types';
+import type { RepoWithTargetBranch, Workspace } from 'shared/types';
 import { useOrganizationStore } from '@/shared/stores/useOrganizationStore';
 import { ConfirmDialog } from '@vibe/ui/components/ConfirmDialog';
 import { getDestinationHostId } from '@/shared/lib/routes/appNavigation';
@@ -35,6 +35,9 @@ import { ActionsContext } from '@/shared/hooks/useActions';
 import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
 import { useAppRuntime } from '@/shared/hooks/useAppRuntime';
 import { useCurrentAppDestination } from '@/shared/hooks/useCurrentAppDestination';
+import { DevServerSelectorDialog } from '@/shared/dialogs/scripts/DevServerSelectorDialog';
+import { getRepoDevServerScripts } from '@/shared/lib/devServerScripts';
+import { workspacesApi } from '@/shared/lib/api';
 
 interface ActionsProviderProps {
   children: ReactNode;
@@ -59,7 +62,42 @@ export function ActionsProvider({ children }: ActionsProviderProps) {
   const userCtx = useContext(UserContext);
   const projectCtx = useContext(ProjectContext);
   // Get dev server state
-  const { start, stop, runningDevServers } = useDevServer(workspaceId);
+  const { start, startAsync, stop, runningDevServers } = useDevServer(workspaceId);
+  const handleStartDevServer = useCallback(async (): Promise<boolean> => {
+    const activeWorkspaceId = workspaceId;
+    if (!activeWorkspaceId) {
+      start();
+      return true;
+    }
+
+    let repos: RepoWithTargetBranch[] = [];
+    try {
+      repos = await workspacesApi.getRepos(activeWorkspaceId);
+    } catch {
+      start();
+      return true;
+    }
+
+    const scriptCount = repos.reduce((count, repo) => {
+      return count + getRepoDevServerScripts(repo).length;
+    }, 0);
+
+    if (scriptCount === 0) {
+      start();
+      return true;
+    }
+
+    const selection = await DevServerSelectorDialog.show({ repos });
+    if (!selection?.confirmed) {
+      return false;
+    }
+
+    await startAsync({
+      repoScriptIds: selection.repoScriptIds,
+    });
+    return true;
+  }, [workspaceId, start, startAsync]);
+
 
   // Default status for issue creation based on current kanban tab
   const [defaultCreateStatusId, setDefaultCreateStatusId] = useState<
@@ -214,7 +252,7 @@ export function ActionsProvider({ children }: ActionsProviderProps) {
       currentWorkspaceId: workspaceId ?? null,
       containerRef: workspace?.container_ref ?? null,
       runningDevServers,
-      startDevServer: start,
+      startDevServer: handleStartDevServer,
       stopDevServer: stop,
       currentLogs,
       logsPanelContent,
@@ -246,7 +284,7 @@ export function ActionsProvider({ children }: ActionsProviderProps) {
     workspaceId,
     workspace?.container_ref,
     runningDevServers,
-    start,
+    handleStartDevServer,
     stop,
     currentLogs,
     logsPanelContent,

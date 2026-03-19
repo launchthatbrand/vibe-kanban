@@ -3,21 +3,23 @@
 //! Provides a separate HTTP server for serving preview iframe content.
 //! This isolates preview content from the main application for security.
 //!
-//! The proxy listens on a separate port and routes requests based on the
-//! Host header subdomain. A request to `{port}.localhost:{proxy_port}/path`
-//! is forwarded to `localhost:{port}/path`.
+//! The proxy listens on a separate port and supports two routing strategies:
+//! - Host-based: `{port}.preview.example.com/path`
+//! - Path-based: `/__vk_preview/{port}/path`
+//!
+//! Both strategies forward requests to `localhost:{port}/path`.
 
 use std::sync::OnceLock;
 
 use axum::{
     Router,
     body::Body,
-    extract::{FromRequestParts, Path, Request, ws::WebSocketUpgrade},
+    extract::{FromRequestParts, Request, ws::WebSocketUpgrade},
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
-    routing::any,
     response::{IntoResponse, Response},
 };
 use futures_util::{SinkExt, StreamExt};
+use regex::{Captures, Regex};
 use reqwest::Client;
 use tokio_tungstenite::tungstenite::{self, client::IntoClientRequest};
 use tower_http::validate_request::ValidateRequestHeaderLayer;
@@ -25,6 +27,7 @@ use tower_http::validate_request::ValidateRequestHeaderLayer;
 /// Global storage for the preview proxy port once assigned.
 /// Set once during server startup, read by the config API.
 static PROXY_PORT: OnceLock<u16> = OnceLock::new();
+static PREVIEW_ROUTING_CONFIG: OnceLock<PreviewRoutingConfig> = OnceLock::new();
 
 /// Shared HTTP client for proxying requests.
 /// Reused across all requests to leverage connection pooling per upstream host:port.
@@ -46,6 +49,100 @@ fn env_flag_enabled(name: &str) -> bool {
             || value.eq_ignore_ascii_case("yes")
             || value.eq_ignore_ascii_case("on")
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviewRoutingMode {
+    Path,
+    Host,
+}
+
+#[derive(Debug, Clone)]
+struct PreviewRoutingConfig {
+    mode: PreviewRoutingMode,
+    path_prefix: String,
+    public_base_url: Option<reqwest::Url>,
+    host_suffix: Option<String>,
+}
+
+fn normalize_path_prefix(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let with_leading_slash = if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{trimmed}")
+    };
+    let normalized = with_leading_slash.trim_end_matches('/').to_string();
+    if normalized.is_empty() {
+        "/__vk_preview".to_string()
+    } else {
+        normalized
+    }
+}
+
+fn normalize_host_suffix(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_start_matches('.').to_ascii_lowercase();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn parse_routing_mode(raw: &str) -> PreviewRoutingMode {
+    if raw.trim().eq_ignore_ascii_case("host") {
+        PreviewRoutingMode::Host
+    } else {
+        PreviewRoutingMode::Path
+    }
+}
+
+fn preview_routing_config_from_env() -> PreviewRoutingConfig {
+    let mode = std::env::var("VK_PREVIEW_ROUTING_MODE")
+        .map(|v| parse_routing_mode(&v))
+        .unwrap_or(PreviewRoutingMode::Path);
+    let path_prefix = std::env::var("VK_PREVIEW_PATH_PREFIX")
+        .map(|v| normalize_path_prefix(&v))
+        .unwrap_or_else(|_| "/__vk_preview".to_string());
+    let public_base_url = std::env::var("VK_PREVIEW_PUBLIC_BASE_URL")
+        .ok()
+        .and_then(|v| reqwest::Url::parse(v.trim()).ok());
+    let host_suffix = std::env::var("VK_PREVIEW_HOST_SUFFIX")
+        .ok()
+        .and_then(|v| normalize_host_suffix(&v));
+
+    PreviewRoutingConfig {
+        mode,
+        path_prefix,
+        public_base_url,
+        host_suffix,
+    }
+}
+
+fn preview_routing_config() -> &'static PreviewRoutingConfig {
+    PREVIEW_ROUTING_CONFIG.get_or_init(preview_routing_config_from_env)
+}
+
+pub fn get_preview_routing_mode() -> String {
+    match preview_routing_config().mode {
+        PreviewRoutingMode::Path => "path".to_string(),
+        PreviewRoutingMode::Host => "host".to_string(),
+    }
+}
+
+pub fn get_preview_path_prefix() -> String {
+    preview_routing_config().path_prefix.clone()
+}
+
+pub fn get_preview_public_base_url() -> Option<String> {
+    preview_routing_config()
+        .public_base_url
+        .as_ref()
+        .map(reqwest::Url::to_string)
+}
+
+pub fn get_preview_host_suffix() -> Option<String> {
+    preview_routing_config().host_suffix.clone()
 }
 /// Get the preview proxy port if set.
 pub fn get_proxy_port() -> Option<u16> {
@@ -130,6 +227,32 @@ fn is_loopback_redirect_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "0.0.0.0" | "::1")
 }
 
+fn root_relative_asset_regex() -> &'static Regex {
+    static ROOT_RELATIVE_ASSET_RE: OnceLock<Regex> = OnceLock::new();
+    ROOT_RELATIVE_ASSET_RE.get_or_init(|| {
+        Regex::new(r#"(?P<prefix>\b(?:href|src|action)=["'])/(?P<path>[^/"'][^"']*)"#)
+            .expect("valid root-relative asset regex")
+    })
+}
+
+fn rewrite_root_relative_asset_urls(html: &str, target_port: u16, path_prefix: &str) -> String {
+    let normalized_prefix = normalize_path_prefix(path_prefix);
+    let prefixed_path = path_mode_prefixed_path("/", target_port, &normalized_prefix);
+    let proxy_prefix = format!("{}/", prefixed_path.trim_end_matches('/'));
+    let already_prefixed_marker = normalized_prefix.trim_start_matches('/');
+
+    root_relative_asset_regex()
+        .replace_all(html, |caps: &Captures| {
+            let asset_path = &caps["path"];
+            if asset_path.starts_with(already_prefixed_marker) {
+                return caps[0].to_string();
+            }
+
+            format!("{}{}{}", &caps["prefix"], proxy_prefix, asset_path)
+        })
+        .into_owned()
+}
+
 fn trim_wrapping_quotes(value: &str) -> &str {
     if value.len() < 2 {
         return value;
@@ -193,10 +316,94 @@ fn normalize_refresh_url_token(raw_value: &str) -> &str {
     trim_wrapping_quotes(without_trailing_punctuation).trim()
 }
 
+fn path_mode_prefixed_path(path: &str, target_port: u16, path_prefix: &str) -> String {
+    let normalized_prefix = normalize_path_prefix(path_prefix);
+    let exact_port_prefix = format!("{normalized_prefix}/{target_port}");
+    if path == exact_port_prefix || path.starts_with(&format!("{exact_port_prefix}/")) {
+        return path.to_string();
+    }
+
+    if path == "/" {
+        return format!("{exact_port_prefix}/");
+    }
+
+    let suffix = path.trim_start_matches('/');
+    if suffix.is_empty() {
+        exact_port_prefix
+    } else {
+        format!("{exact_port_prefix}/{suffix}")
+    }
+}
+
+fn fallback_localhost_proxy_url(parsed: &reqwest::Url, target_port: u16, proxy_port: u16) -> Option<String> {
+    let mut rewritten = parsed.clone();
+    rewritten.set_scheme("http").ok()?;
+    rewritten
+        .set_host(Some(&format!("{target_port}.localhost")))
+        .ok()?;
+    rewritten.set_port(Some(proxy_port)).ok()?;
+    Some(rewritten.to_string())
+}
+
+fn host_mode_default_scheme(host_suffix: &str) -> &'static str {
+    let lower = host_suffix.to_ascii_lowercase();
+    if lower == "localhost"
+        || lower.ends_with(".localhost")
+        || lower.starts_with("127.")
+        || lower == "::1"
+    {
+        "http"
+    } else {
+        "https"
+    }
+}
+
+fn rewrite_loopback_absolute_url(
+    parsed: &reqwest::Url,
+    target_port: u16,
+    proxy_port: Option<u16>,
+    routing_config: &PreviewRoutingConfig,
+) -> Option<String> {
+    match routing_config.mode {
+        PreviewRoutingMode::Path => {
+            if let Some(base) = &routing_config.public_base_url {
+                let mut rewritten = base.clone();
+                let prefixed_path = path_mode_prefixed_path(
+                    parsed.path(),
+                    target_port,
+                    &routing_config.path_prefix,
+                );
+                rewritten.set_path(&prefixed_path);
+                rewritten.set_query(parsed.query());
+                rewritten.set_fragment(parsed.fragment());
+                return Some(rewritten.to_string());
+            }
+
+            let proxy_port = proxy_port?;
+            fallback_localhost_proxy_url(parsed, target_port, proxy_port)
+        }
+        PreviewRoutingMode::Host => {
+            if let Some(host_suffix) = &routing_config.host_suffix {
+                let mut rewritten = parsed.clone();
+                rewritten.set_scheme(host_mode_default_scheme(host_suffix)).ok()?;
+                rewritten
+                    .set_host(Some(&format!("{target_port}.{host_suffix}")))
+                    .ok()?;
+                rewritten.set_port(None).ok()?;
+                return Some(rewritten.to_string());
+            }
+
+            let proxy_port = proxy_port?;
+            fallback_localhost_proxy_url(parsed, target_port, proxy_port)
+        }
+    }
+}
+
 fn rewrite_redirect_like_header_value(
     value: &str,
     target_port: u16,
-    proxy_port: u16,
+    proxy_port: Option<u16>,
+    routing_config: &PreviewRoutingConfig,
 ) -> Option<String> {
     let original_value = value.trim();
     if original_value.is_empty() {
@@ -210,13 +417,24 @@ fn rewrite_redirect_like_header_value(
         || normalized_value.starts_with('?')
         || normalized_value.starts_with('#')
     {
+        if normalized_value.starts_with('/') && routing_config.mode == PreviewRoutingMode::Path {
+            let rewritten = path_mode_prefixed_path(
+                &normalized_value,
+                target_port,
+                &routing_config.path_prefix,
+            );
+            if rewritten != original_value {
+                return Some(rewritten);
+            }
+        }
+
         if normalized_value == original_value {
             return None;
         }
         return Some(normalized_value);
     }
 
-    let mut parsed = if normalized_value.starts_with("//") {
+    let parsed = if normalized_value.starts_with("//") {
         reqwest::Url::parse(&format!("http:{normalized_value}")).ok()?
     } else {
         reqwest::Url::parse(&normalized_value).ok()?
@@ -237,15 +455,15 @@ fn rewrite_redirect_like_header_value(
         return Some(normalized_value);
     }
 
-    parsed.set_scheme("http").ok()?;
-    parsed
-        .set_host(Some(&format!("{target_port}.localhost")))
-        .ok()?;
-    parsed.set_port(Some(proxy_port)).ok()?;
-    Some(parsed.to_string())
+    rewrite_loopback_absolute_url(&parsed, target_port, proxy_port, routing_config)
 }
 
-fn rewrite_refresh_header_value(value: &str, target_port: u16, proxy_port: u16) -> Option<String> {
+fn rewrite_refresh_header_value(
+    value: &str,
+    target_port: u16,
+    proxy_port: Option<u16>,
+    routing_config: &PreviewRoutingConfig,
+) -> Option<String> {
     let mut segments: Vec<String> = value.split(';').map(|s| s.trim().to_string()).collect();
     if segments.len() < 2 {
         return None;
@@ -264,7 +482,12 @@ fn rewrite_refresh_header_value(value: &str, target_port: u16, proxy_port: u16) 
         }
 
         if let Some(rewritten) =
-            rewrite_redirect_like_header_value(raw_unquoted, target_port, proxy_port)
+            rewrite_redirect_like_header_value(
+                raw_unquoted,
+                target_port,
+                proxy_port,
+                routing_config,
+            )
         {
             *segment = format!("url={rewritten}");
             return Some(segments.join("; "));
@@ -286,11 +509,8 @@ fn rewrite_redirect_like_headers(
     headers: &mut [(HeaderName, HeaderValue)],
     target_port: u16,
     proxy_port: Option<u16>,
+    routing_config: &PreviewRoutingConfig,
 ) {
-    let Some(proxy_port) = proxy_port else {
-        return;
-    };
-
     for (name, value) in headers.iter_mut() {
         let name_lower = name.as_str().to_ascii_lowercase();
         if !is_redirect_like_header_name(&name_lower) {
@@ -302,9 +522,9 @@ fn rewrite_redirect_like_headers(
         };
 
         let rewritten = if name_lower == "refresh" {
-            rewrite_refresh_header_value(value_str, target_port, proxy_port)
+            rewrite_refresh_header_value(value_str, target_port, proxy_port, routing_config)
         } else {
-            rewrite_redirect_like_header_value(value_str, target_port, proxy_port)
+            rewrite_redirect_like_header_value(value_str, target_port, proxy_port, routing_config)
         };
 
         if let Some(rewritten) = rewritten
@@ -321,29 +541,37 @@ fn extract_target_from_host(headers: &HeaderMap) -> Option<u16> {
     subdomain.parse::<u16>().ok()
 }
 
-async fn subdomain_proxy(request: Request) -> Response {
-    let target_port = match extract_target_from_host(request.headers()) {
-        Some(port) => port,
-        None => {
-            return (StatusCode::BAD_REQUEST, "No valid port in Host subdomain").into_response();
-        }
+fn extract_target_from_path(uri_path: &str, path_prefix: &str) -> Option<(u16, String)> {
+    let normalized_prefix = normalize_path_prefix(path_prefix);
+    let after_prefix = uri_path.strip_prefix(&normalized_prefix)?;
+    let after_prefix = after_prefix.strip_prefix('/')?;
+    let mut segments = after_prefix.splitn(2, '/');
+    let target_port = segments.next()?.parse::<u16>().ok()?;
+    let upstream_path = segments.next().unwrap_or("").to_string();
+    Some((target_port, upstream_path))
+}
+
+async fn preview_proxy(request: Request) -> Response {
+    let routing_config = preview_routing_config();
+    let uri_path = request.uri().path().to_string();
+    let host_target_port = extract_target_from_host(request.headers());
+    let path_target = extract_target_from_path(&uri_path, &routing_config.path_prefix);
+    let host_target = host_target_port.map(|port| (port, uri_path.trim_start_matches('/').to_string()));
+
+    let selected_target = match routing_config.mode {
+        PreviewRoutingMode::Path => path_target.or(host_target),
+        PreviewRoutingMode::Host => host_target.or(path_target),
     };
 
-    let path = request.uri().path().trim_start_matches('/').to_string();
+    let Some((target_port, upstream_path)) = selected_target else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "No valid preview target in path or Host subdomain",
+        )
+            .into_response();
+    };
 
-    proxy_impl(target_port, path, request).await
-}
-
-async fn path_proxy_root(Path(target_port): Path<u16>, request: Request) -> Response {
-    proxy_impl(target_port, String::new(), request).await
-}
-
-async fn path_proxy_with_rest(
-    Path((target_port, rest)): Path<(u16, String)>,
-    request: Request,
-) -> Response {
-    let path = rest.trim_start_matches('/').to_string();
-    proxy_impl(target_port, path, request).await
+    proxy_impl(target_port, upstream_path, request).await
 }
 
 async fn proxy_impl(target_port: u16, path_str: String, request: Request) -> Response {
@@ -477,7 +705,13 @@ async fn http_proxy_handler(target_port: u16, path_str: String, request: Request
     let is_html = content_type.contains("text/html");
 
     let mut response_headers = collect_response_headers(response.headers(), is_html);
-    rewrite_redirect_like_headers(&mut response_headers, target_port, get_proxy_port());
+    let routing_config = preview_routing_config();
+    rewrite_redirect_like_headers(
+        &mut response_headers,
+        target_port,
+        get_proxy_port(),
+        routing_config,
+    );
 
     let status = StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::OK);
 
@@ -520,6 +754,14 @@ async fn http_proxy_handler(target_port: u16, path_str: String, request: Request
         match response.bytes().await {
             Ok(body_bytes) => {
                 let mut html = String::from_utf8_lossy(&body_bytes).to_string();
+
+                // In path mode (/__vk_preview/{port}/...), root-relative URLs like
+                // href="/_next/..." bypass the proxy prefix and drop styles/scripts.
+                // Rewrite those root-relative asset links back through the path proxy.
+                if routing_config.mode == PreviewRoutingMode::Path {
+                    html =
+                        rewrite_root_relative_asset_urls(&html, target_port, &routing_config.path_prefix);
+                }
 
                 // Inject bippy bundle after <head> (must load before React)
                 if let Some(pos) = html.to_lowercase().find("<head>") {
@@ -585,7 +827,8 @@ async fn http_proxy_handler(target_port: u16, path_str: String, request: Request
                         rewrite_redirect_like_header_value(
                             &redirect_info.url,
                             target_port,
-                            proxy_port,
+                            Some(proxy_port),
+                            routing_config,
                         )
                         .unwrap_or_else(|| redirect_info.url.clone())
                     } else {
@@ -776,13 +1019,7 @@ where
     S: Clone + Send + Sync + 'static,
 {
     Router::new()
-        .route("/__vk_preview/{target_port}", any(path_proxy_root))
-        .route("/__vk_preview/{target_port}/", any(path_proxy_root))
-        .route(
-            "/__vk_preview/{target_port}/{*rest}",
-            any(path_proxy_with_rest),
-        )
-        .fallback(subdomain_proxy)
+        .fallback(preview_proxy)
         .layer(ValidateRequestHeaderLayer::custom(
             crate::middleware::validate_origin,
         ))
@@ -872,6 +1109,27 @@ mod tests {
     };
 
     use super::*;
+
+    fn host_routing_config() -> PreviewRoutingConfig {
+        PreviewRoutingConfig {
+            mode: PreviewRoutingMode::Host,
+            path_prefix: "/__vk_preview".to_string(),
+            public_base_url: None,
+            host_suffix: None,
+        }
+    }
+
+    fn path_routing_config_with_public_base() -> PreviewRoutingConfig {
+        PreviewRoutingConfig {
+            mode: PreviewRoutingMode::Path,
+            path_prefix: "/__vk_preview".to_string(),
+            public_base_url: Some(
+                reqwest::Url::parse("https://kanban.onpoint.host")
+                    .expect("valid public base URL for tests"),
+            ),
+            host_suffix: None,
+        }
+    }
 
     #[test]
     fn collect_response_headers_preserves_multiple_set_cookie_values() {
@@ -966,10 +1224,12 @@ mod tests {
 
     #[test]
     fn rewrite_redirect_like_header_value_rewrites_loopback_absolute_url() {
+        let routing_config = host_routing_config();
         let rewritten = rewrite_redirect_like_header_value(
             "http://localhost:4000/generate?from=auth#done",
             4000,
-            3009,
+            Some(3009),
+            &routing_config,
         );
 
         assert_eq!(
@@ -980,23 +1240,35 @@ mod tests {
 
     #[test]
     fn rewrite_redirect_like_header_value_keeps_relative_and_non_loopback_urls() {
+        let routing_config = host_routing_config();
         assert_eq!(
-            rewrite_redirect_like_header_value("/generate", 4000, 3009),
+            rewrite_redirect_like_header_value("/generate", 4000, Some(3009), &routing_config),
             None
         );
         assert_eq!(
-            rewrite_redirect_like_header_value("?from=auth", 4000, 3009),
+            rewrite_redirect_like_header_value("?from=auth", 4000, Some(3009), &routing_config),
             None
         );
         assert_eq!(
-            rewrite_redirect_like_header_value("https://example.com/generate", 4000, 3009),
+            rewrite_redirect_like_header_value(
+                "https://example.com/generate",
+                4000,
+                Some(3009),
+                &routing_config
+            ),
             None
         );
     }
 
     #[test]
     fn rewrite_redirect_like_header_value_rewrites_scheme_relative_loopback_url() {
-        let rewritten = rewrite_redirect_like_header_value("//localhost:4000/generate", 4000, 3009);
+        let routing_config = host_routing_config();
+        let rewritten = rewrite_redirect_like_header_value(
+            "//localhost:4000/generate",
+            4000,
+            Some(3009),
+            &routing_config,
+        );
 
         assert_eq!(
             rewritten.as_deref(),
@@ -1006,10 +1278,12 @@ mod tests {
 
     #[test]
     fn rewrite_refresh_header_value_rewrites_embedded_url() {
+        let routing_config = host_routing_config();
         let rewritten = rewrite_refresh_header_value(
             "0; URL='http://localhost:4000/generate?from=auth'",
             4000,
-            3009,
+            Some(3009),
+            &routing_config,
         );
 
         assert_eq!(
@@ -1020,10 +1294,12 @@ mod tests {
 
     #[test]
     fn rewrite_refresh_header_value_handles_trailing_comma_in_quoted_url() {
+        let routing_config = host_routing_config();
         let rewritten = rewrite_refresh_header_value(
             "0; URL=\"http://localhost:4000/?_refresh=7\",",
             4000,
-            3009,
+            Some(3009),
+            &routing_config,
         );
 
         assert_eq!(
@@ -1034,15 +1310,26 @@ mod tests {
 
     #[test]
     fn rewrite_redirect_like_header_value_cleans_quoted_relative_url() {
-        let rewritten = rewrite_redirect_like_header_value("\"/generate\",", 4000, 3009);
+        let routing_config = host_routing_config();
+        let rewritten = rewrite_redirect_like_header_value(
+            "\"/generate\",",
+            4000,
+            Some(3009),
+            &routing_config,
+        );
 
         assert_eq!(rewritten.as_deref(), Some("/generate"));
     }
 
     #[test]
     fn rewrite_redirect_like_header_value_cleans_and_rewrites_quoted_absolute_url() {
-        let rewritten =
-            rewrite_redirect_like_header_value("\"http://localhost:4000/generate\",", 4000, 3009);
+        let routing_config = host_routing_config();
+        let rewritten = rewrite_redirect_like_header_value(
+            "\"http://localhost:4000/generate\",",
+            4000,
+            Some(3009),
+            &routing_config,
+        );
 
         assert_eq!(
             rewritten.as_deref(),
@@ -1052,10 +1339,12 @@ mod tests {
 
     #[test]
     fn rewrite_redirect_like_header_value_skips_structured_values() {
+        let routing_config = host_routing_config();
         let rewritten = rewrite_redirect_like_header_value(
             "url=\"http://localhost:4000/generate\", mode=replace",
             4000,
-            3009,
+            Some(3009),
+            &routing_config,
         );
 
         assert_eq!(rewritten, None);
@@ -1063,6 +1352,7 @@ mod tests {
 
     #[test]
     fn rewrite_redirect_like_headers_rewrites_generic_redirect_headers_only() {
+        let routing_config = host_routing_config();
         let mut headers = vec![
             (
                 LOCATION,
@@ -1082,7 +1372,7 @@ mod tests {
             ),
         ];
 
-        rewrite_redirect_like_headers(&mut headers, 4000, Some(3009));
+        rewrite_redirect_like_headers(&mut headers, 4000, Some(3009), &routing_config);
 
         assert_eq!(
             headers[0].1,
@@ -1104,6 +1394,7 @@ mod tests {
 
     #[test]
     fn rewrite_redirect_like_headers_rewrites_rewrite_headers_and_keeps_plain_url_headers() {
+        let routing_config = host_routing_config();
         let mut headers = vec![
             (
                 HeaderName::from_static("x-router-rewrite"),
@@ -1115,7 +1406,7 @@ mod tests {
             ),
         ];
 
-        rewrite_redirect_like_headers(&mut headers, 4000, Some(3009));
+        rewrite_redirect_like_headers(&mut headers, 4000, Some(3009), &routing_config);
 
         assert_eq!(
             headers[0].1,
@@ -1143,12 +1434,13 @@ mod tests {
 
     #[test]
     fn rewrite_redirect_like_headers_rewrites_nextjs_redirect() {
+        let routing_config = host_routing_config();
         let mut headers = vec![(
             HeaderName::from_static("x-nextjs-redirect"),
             HeaderValue::from_static("http://localhost:4000/generate"),
         )];
 
-        rewrite_redirect_like_headers(&mut headers, 4000, Some(3009));
+        rewrite_redirect_like_headers(&mut headers, 4000, Some(3009), &routing_config);
 
         assert_eq!(
             headers[0].1,
@@ -1172,15 +1464,49 @@ mod tests {
 
     #[test]
     fn rewrite_redirect_like_headers_preserves_relative_nextjs_redirect() {
+        let routing_config = host_routing_config();
         let mut headers = vec![(
             HeaderName::from_static("x-nextjs-redirect"),
             HeaderValue::from_static("/generate"),
         )];
 
-        rewrite_redirect_like_headers(&mut headers, 4000, Some(3009));
+        rewrite_redirect_like_headers(&mut headers, 4000, Some(3009), &routing_config);
 
         // Relative URLs are NOT rewritten — only absolute loopback URLs are
         assert_eq!(headers[0].1, HeaderValue::from_static("/generate"));
+    }
+
+    #[test]
+    fn rewrite_redirect_like_header_value_rewrites_root_relative_path_for_path_mode() {
+        let routing_config = path_routing_config_with_public_base();
+        let rewritten = rewrite_redirect_like_header_value(
+            "/sign-in",
+            4000,
+            Some(3009),
+            &routing_config,
+        );
+        assert_eq!(rewritten.as_deref(), Some("/__vk_preview/4000/sign-in"));
+    }
+
+    #[test]
+    fn rewrite_redirect_like_header_value_rewrites_absolute_loopback_for_path_mode() {
+        let routing_config = path_routing_config_with_public_base();
+        let rewritten = rewrite_redirect_like_header_value(
+            "http://localhost:4000/sign-in?source=auth",
+            4000,
+            Some(3009),
+            &routing_config,
+        );
+        assert_eq!(
+            rewritten.as_deref(),
+            Some("https://kanban.onpoint.host/__vk_preview/4000/sign-in?source=auth")
+        );
+    }
+
+    #[test]
+    fn extract_target_from_path_extracts_port_and_upstream_path() {
+        let extracted = extract_target_from_path("/__vk_preview/3800/platform", "/__vk_preview");
+        assert_eq!(extracted, Some((3800, "platform".to_string())));
     }
 
     #[test]
