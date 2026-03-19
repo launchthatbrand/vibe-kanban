@@ -1,23 +1,32 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 import { FileTree } from '@vibe/ui/components/FileTree';
 import {
   buildFileTree,
+  buildFileTreeFromEntries,
   filterFileTree,
   getExpandedPathsForSearch,
   getAllFolderPaths,
   sortDiffs,
 } from '@/shared/lib/fileTreeUtils';
-import { usePersistedCollapsedPaths } from '@/shared/stores/useUiPreferencesStore';
+import {
+  usePersistedCollapsedPaths,
+  useWorkspacePanelState,
+  type FilePanelMode,
+} from '@/shared/stores/useUiPreferencesStore';
 import { useWorkspaceContext } from '@/shared/hooks/useWorkspaceContext';
 import { useChangesView } from '@/shared/hooks/useChangesView';
 import { getFileIcon } from '@/shared/lib/fileTypeIcon';
 import { useTheme } from '@/shared/hooks/useTheme';
 import { getActualTheme } from '@/shared/lib/theme';
+import { useWorkspaceRepo } from '@/shared/hooks/useWorkspaceRepo';
+import { useWorkspaceFileTree } from '@/shared/hooks/useWorkspaceFiles';
 import type { Diff } from 'shared/types';
 
 interface FileTreeContainerProps {
   workspaceId: string;
   diffs: Diff[];
+  mode: FilePanelMode;
   onSelectFile: (path: string, diff: Diff) => void;
   className: string;
 }
@@ -25,11 +34,14 @@ interface FileTreeContainerProps {
 export function FileTreeContainer({
   workspaceId,
   diffs,
+  mode,
   onSelectFile,
   className,
 }: FileTreeContainerProps) {
+  const { t } = useTranslation('common');
   const { theme } = useTheme();
   const actualTheme = getActualTheme(theme);
+  const isAllMode = mode === 'all';
 
   const { fileInView } = useChangesView();
   const [searchQuery, setSearchQuery] = useState('');
@@ -37,6 +49,15 @@ export function FileTreeContainer({
     usePersistedCollapsedPaths(workspaceId);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const nodeRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const { selectedRepoId } = useWorkspaceRepo(workspaceId, { enabled: isAllMode });
+  const { selectedAllFilePath, setSelectedAllFilePath } =
+    useWorkspacePanelState(workspaceId);
+  const { entries: allFileEntries } = useWorkspaceFileTree(
+    workspaceId,
+    selectedRepoId,
+    '',
+    isAllMode
+  );
 
   // Get GitHub comments state from workspace context
   const {
@@ -50,9 +71,9 @@ export function FileTreeContainer({
 
   const { selectFile, scrollToFile } = useChangesView();
 
-  // Sync selectedPath with fileInView from context and scroll into view
+  // Sync selectedPath with fileInView from context in changes mode.
   useEffect(() => {
-    if (fileInView !== undefined) {
+    if (!isAllMode && fileInView !== undefined) {
       setSelectedPath(fileInView);
       // Scroll the selected node into view if needed
       if (fileInView) {
@@ -62,7 +83,23 @@ export function FileTreeContainer({
         }
       }
     }
-  }, [fileInView]);
+  }, [fileInView, isAllMode]);
+
+  // Sync selected path from persisted all-mode state.
+  useEffect(() => {
+    if (isAllMode) {
+      setSelectedPath(selectedAllFilePath);
+    }
+  }, [isAllMode, selectedAllFilePath]);
+
+  useEffect(() => {
+    if (!isAllMode) return;
+    if (selectedAllFilePath) return;
+    const firstFile = allFileEntries.find((entry) => !entry.is_directory)?.path;
+    if (firstFile) {
+      setSelectedAllFilePath(firstFile);
+    }
+  }, [allFileEntries, isAllMode, selectedAllFilePath, setSelectedAllFilePath]);
 
   const handleNodeRef = useCallback(
     (path: string, el: HTMLDivElement | null) => {
@@ -75,8 +112,14 @@ export function FileTreeContainer({
     []
   );
 
-  // Build tree from diffs
-  const fullTree = useMemo(() => buildFileTree(diffs), [diffs]);
+  // Build tree from diffs in changes mode, from workspace files in all mode.
+  const fullTree = useMemo(
+    () =>
+      isAllMode
+        ? buildFileTreeFromEntries(allFileEntries)
+        : buildFileTree(diffs),
+    [allFileEntries, diffs, isAllMode]
+  );
 
   // Get all folder paths for expand all functionality
   const allFolderPaths = useMemo(() => getAllFolderPaths(fullTree), [fullTree]);
@@ -127,17 +170,22 @@ export function FileTreeContainer({
   const handleSelectFile = useCallback(
     (path: string) => {
       setSelectedPath(path);
+      if (isAllMode) {
+        setSelectedAllFilePath(path);
+        return;
+      }
       const diff = diffs.find((d) => d.newPath === path || d.oldPath === path);
       if (diff) {
         scrollToFile(path);
         onSelectFile(path, diff);
       }
     },
-    [diffs, onSelectFile, scrollToFile]
+    [diffs, isAllMode, onSelectFile, scrollToFile, setSelectedAllFilePath]
   );
 
   // Get list of diff paths that have GitHub comments, sorted to match visual order
   const filesWithComments = useMemo(() => {
+    if (isAllMode) return [];
     const ghFiles = getFilesWithGitHubComments();
     // Sort diffs first to match visual order, then filter to those with comments
     return sortDiffs(diffs)
@@ -147,7 +195,7 @@ export function FileTreeContainer({
           (ghPath) => diffPath === ghPath || diffPath.endsWith('/' + ghPath)
         )
       );
-  }, [getFilesWithGitHubComments, diffs]);
+  }, [getFilesWithGitHubComments, diffs, isAllMode]);
 
   // Navigate between files with GitHub comments
   const handleNavigateComments = useCallback(
@@ -201,12 +249,15 @@ export function FileTreeContainer({
       isAllExpanded={isAllExpanded}
       onToggleExpandAll={handleToggleExpandAll}
       className={className}
-      showGitHubComments={showGitHubComments}
-      onToggleGitHubComments={setShowGitHubComments}
-      getGitHubCommentCountForFile={getGitHubCommentCountForFile}
-      isGitHubCommentsLoading={isGitHubCommentsLoading}
-      onNavigateComments={handleNavigateComments}
-      hasFilesWithComments={filesWithComments.length > 0}
+      showGitHubComments={isAllMode ? false : showGitHubComments}
+      onToggleGitHubComments={isAllMode ? undefined : setShowGitHubComments}
+      getGitHubCommentCountForFile={
+        isAllMode ? undefined : getGitHubCommentCountForFile
+      }
+      isGitHubCommentsLoading={isAllMode ? false : isGitHubCommentsLoading}
+      onNavigateComments={isAllMode ? undefined : handleNavigateComments}
+      hasFilesWithComments={isAllMode ? false : filesWithComments.length > 0}
+      emptyMessage={isAllMode ? t('fileTree.noFiles') : t('empty.noChanges')}
     />
   );
 }

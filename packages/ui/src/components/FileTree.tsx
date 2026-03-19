@@ -39,6 +39,7 @@ interface FileTreeProps {
   onNavigateComments?: (direction: 'prev' | 'next') => void;
   /** Whether there are files with GitHub comments to navigate */
   hasFilesWithComments?: boolean;
+  emptyMessage?: string;
 }
 
 export function FileTree({
@@ -60,6 +61,7 @@ export function FileTree({
   onNavigateComments,
   hasFilesWithComments,
   renderFileIcon,
+  emptyMessage,
 }: FileTreeProps) {
   const { t } = useTranslation(['tasks', 'common']);
   const renderNodes = (nodeList: FileTreeViewNode[], depth = 0) => {
@@ -164,7 +166,9 @@ export function FileTree({
           renderNodes(nodes)
         ) : (
           <div className="p-base text-low text-sm">
-            {searchQuery ? t('common:fileTree.noResults') : 'No changed files'}
+            {searchQuery
+              ? t('common:fileTree.noResults')
+              : (emptyMessage ?? 'No changed files')}
           </div>
         )}
       </div>

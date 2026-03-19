@@ -1,5 +1,6 @@
 import type { Diff } from 'shared/types';
 import type { TreeNode } from '@/shared/types/fileTree';
+import type { WorkspaceFileTreeEntry } from 'shared/types';
 
 /**
  * Transforms flat Diff[] into hierarchical TreeNode[]
@@ -183,6 +184,50 @@ export function getAllFolderPaths(nodes: TreeNode[]): string[] {
 
   nodes.forEach(traverse);
   return paths;
+}
+
+/**
+ * Build file tree from workspace file entries.
+ */
+export function buildFileTreeFromEntries(
+  entries: WorkspaceFileTreeEntry[]
+): TreeNode[] {
+  const root: TreeNode[] = [];
+  const nodeByPath = new Map<string, TreeNode>();
+
+  for (const entry of entries) {
+    if (!entry.path) continue;
+    const parts = entry.path.split('/').filter(Boolean);
+    if (parts.length === 0) continue;
+
+    for (let i = 0; i < parts.length; i++) {
+      const currentPath = parts.slice(0, i + 1).join('/');
+      if (nodeByPath.has(currentPath)) continue;
+
+      const isLeaf = i === parts.length - 1;
+      const isDirectory = isLeaf ? entry.is_directory : true;
+      const node: TreeNode = {
+        id: currentPath,
+        name: parts[i],
+        path: currentPath,
+        type: isDirectory ? 'folder' : 'file',
+        children: isDirectory ? [] : undefined,
+      };
+      nodeByPath.set(currentPath, node);
+
+      if (i === 0) {
+        root.push(node);
+      } else {
+        const parentPath = parts.slice(0, i).join('/');
+        const parent = nodeByPath.get(parentPath);
+        if (parent && parent.children) {
+          parent.children.push(node);
+        }
+      }
+    }
+  }
+
+  return sortTreeNodes(root);
 }
 
 /**

@@ -3,6 +3,7 @@ pub mod core;
 pub mod create;
 pub mod cursor_setup;
 pub mod execution;
+pub mod files;
 pub mod gh_cli_setup;
 pub mod git;
 pub mod images;
@@ -34,6 +35,7 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
         .nest("/git", git::router())
         .nest("/execution", execution::router())
         .nest("/integration", integration::router())
+        .nest("/files", files::router())
         .nest("/repos", repos::router())
         .nest("/pull-requests", pr::router())
         .layer(from_fn_with_state(

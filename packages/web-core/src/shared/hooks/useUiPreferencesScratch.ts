@@ -11,6 +11,7 @@ import {
 import {
   useUiPreferencesStore,
   type RightMainPanelMode,
+  type FilePanelMode,
   type ContextBarPosition,
   type WorkspacePanelState,
   type WorkspaceFilterState,
@@ -50,6 +51,8 @@ function storeToScratchData(state: {
     workspacePanelStates[key] = {
       right_main_panel_mode: value.rightMainPanelMode,
       is_left_main_panel_visible: value.isLeftMainPanelVisible,
+      file_panel_mode: value.filePanelMode,
+      selected_all_file_path: value.selectedAllFilePath,
     };
   }
 
@@ -104,6 +107,8 @@ function scratchDataToStore(data: UiPreferencesData): {
           rightMainPanelMode:
             (value.right_main_panel_mode as RightMainPanelMode) ?? null,
           isLeftMainPanelVisible: value.is_left_main_panel_visible ?? true,
+          filePanelMode: (value.file_panel_mode as FilePanelMode) ?? 'changes',
+          selectedAllFilePath: value.selected_all_file_path ?? null,
         };
       }
     }

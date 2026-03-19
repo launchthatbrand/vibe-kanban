@@ -58,7 +58,7 @@ export type PreviewSettingsData = { url: string, screen_size: string | null, res
 
 export type WorkspaceNotesData = { content: string, };
 
-export type WorkspacePanelStateData = { right_main_panel_mode: string | null, is_left_main_panel_visible: boolean, };
+export type WorkspacePanelStateData = { right_main_panel_mode: string | null, is_left_main_panel_visible: boolean, file_panel_mode: string | null, selected_all_file_path: string | null, };
 
 export type WorkspacePrFilterData = "all" | "has_pr" | "no_pr";
 
@@ -467,6 +467,20 @@ export type DiffStats = { files_changed: number, lines_added: number, lines_remo
 export type DirectoryEntry = { name: string, path: string, is_directory: boolean, is_git_repo: boolean, last_modified: bigint | null, };
 
 export type DirectoryListResponse = { entries: Array<DirectoryEntry>, current_path: string, };
+
+export type WorkspaceFileTreeQuery = { repo_id: string | null, path: string | null, recursive: boolean | null, };
+
+export type WorkspaceFileContentQuery = { repo_id: string | null, path: string, };
+
+export type WorkspaceFileTreeEntry = { name: string, path: string, is_directory: boolean, size_bytes: bigint | null, modified_at_ms: bigint | null, };
+
+export type WorkspaceFileTreeResponse = { entries: Array<WorkspaceFileTreeEntry>, current_path: string, repo_id: string | null, };
+
+export type WorkspaceFileContentResponse = { path: string, content: string | null, is_binary: boolean, is_too_large: boolean, size_bytes: bigint, modified_at_ms: bigint | null, encoding: string | null, };
+
+export type WorkspaceFileContentUpdateRequest = { repo_id: string | null, path: string, content: string, expected_modified_at_ms: bigint | null, };
+
+export type WorkspaceFileContentUpdateResponse = { path: string, size_bytes: bigint, modified_at_ms: bigint | null, };
 
 export type SearchMode = "taskform" | "settings";
 

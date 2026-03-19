@@ -11,6 +11,10 @@ import {
   CreateTag,
   DirectoryListResponse,
   DirectoryEntry,
+  WorkspaceFileTreeResponse,
+  WorkspaceFileContentResponse,
+  WorkspaceFileContentUpdateRequest,
+  WorkspaceFileContentUpdateResponse,
   ExecutionProcess,
   ExecutionProcessRepoState,
   GitBranch,
@@ -786,6 +790,62 @@ export const fileSystemApi = {
       `/api/filesystem/git-repos${queryParam}`
     );
     return handleApiResponse<DirectoryEntry[]>(response);
+  },
+};
+
+type WorkspaceFileTreeOptions = {
+  repo_id?: string | null;
+  path?: string | null;
+  recursive?: boolean | null;
+};
+
+type WorkspaceFileContentOptions = {
+  repo_id?: string | null;
+  path: string;
+};
+
+// Workspace file APIs (All mode editor)
+export const workspaceFilesApi = {
+  getTree: async (
+    workspaceId: string,
+    options: WorkspaceFileTreeOptions = {}
+  ): Promise<WorkspaceFileTreeResponse> => {
+    const params = new URLSearchParams();
+    if (options.repo_id) params.set('repo_id', options.repo_id);
+    if (options.path) params.set('path', options.path);
+    if (typeof options.recursive === 'boolean') {
+      params.set('recursive', String(options.recursive));
+    }
+
+    const query = params.toString();
+    const response = await makeRequest(
+      `/api/workspaces/${workspaceId}/files/tree${query ? `?${query}` : ''}`
+    );
+    return handleApiResponse<WorkspaceFileTreeResponse>(response);
+  },
+
+  getContent: async (
+    workspaceId: string,
+    options: WorkspaceFileContentOptions
+  ): Promise<WorkspaceFileContentResponse> => {
+    const params = new URLSearchParams();
+    params.set('path', options.path);
+    if (options.repo_id) params.set('repo_id', options.repo_id);
+    const response = await makeRequest(
+      `/api/workspaces/${workspaceId}/files/content?${params.toString()}`
+    );
+    return handleApiResponse<WorkspaceFileContentResponse>(response);
+  },
+
+  updateContent: async (
+    workspaceId: string,
+    payload: WorkspaceFileContentUpdateRequest
+  ): Promise<WorkspaceFileContentUpdateResponse> => {
+    const response = await makeRequest(`/api/workspaces/${workspaceId}/files/content`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+    return handleApiResponse<WorkspaceFileContentUpdateResponse>(response);
   },
 };
 

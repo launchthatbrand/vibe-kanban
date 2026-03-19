@@ -29,6 +29,7 @@ import {
 } from './WorkspacesMainContainer';
 import { RightSidebar } from './RightSidebar';
 import { ChangesPanelContainer } from './ChangesPanelContainer';
+import { FileEditorPanelContainer } from './FileEditorPanelContainer';
 import { CreateChatBoxContainer } from '@/shared/components/CreateChatBoxContainer';
 import { PreviewBrowserContainer } from './PreviewBrowserContainer';
 import { WorkspacesGuideDialog } from '@/shared/dialogs/shared/WorkspacesGuideDialog';
@@ -126,6 +127,7 @@ export function WorkspacesLayout() {
     isLeftMainPanelVisible,
     isRightSidebarVisible,
     rightMainPanelMode,
+    filePanelMode,
     setLeftSidebarVisible,
     setLeftMainPanelVisible,
   } = useWorkspacePanelState(isCreateMode ? undefined : workspaceId);
@@ -237,10 +239,14 @@ export function WorkspacesLayout() {
               )}
             >
               {selectedWorkspace?.id && (
-                <ChangesPanelContainer
-                  className=""
-                  workspaceId={selectedWorkspace.id}
-                />
+                filePanelMode === 'all' ? (
+                  <FileEditorPanelContainer workspaceId={selectedWorkspace.id} />
+                ) : (
+                  <ChangesPanelContainer
+                    className=""
+                    workspaceId={selectedWorkspace.id}
+                  />
+                )
               )}
             </div>
 
@@ -357,10 +363,14 @@ export function WorkspacesLayout() {
               >
                 {rightMainPanelMode === RIGHT_MAIN_PANEL_MODES.CHANGES &&
                   selectedWorkspace?.id && (
-                    <ChangesPanelContainer
-                      className=""
-                      workspaceId={selectedWorkspace.id}
-                    />
+                    filePanelMode === 'all' ? (
+                      <FileEditorPanelContainer workspaceId={selectedWorkspace.id} />
+                    ) : (
+                      <ChangesPanelContainer
+                        className=""
+                        workspaceId={selectedWorkspace.id}
+                      />
+                    )
                   )}
                 {rightMainPanelMode === RIGHT_MAIN_PANEL_MODES.LOGS && (
                   <LogsContentContainer className="" />

@@ -50,11 +50,17 @@ export type ContextBarPosition =
 export type WorkspacePanelState = {
   rightMainPanelMode: RightMainPanelMode | null;
   isLeftMainPanelVisible: boolean;
+  filePanelMode: FilePanelMode;
+  selectedAllFilePath: string | null;
 };
+
+export type FilePanelMode = 'changes' | 'all';
 
 const DEFAULT_WORKSPACE_PANEL_STATE: WorkspacePanelState = {
   rightMainPanelMode: null,
   isLeftMainPanelVisible: true,
+  filePanelMode: 'changes',
+  selectedAllFilePath: null,
 };
 
 // Kanban filter state
@@ -383,6 +389,11 @@ type State = {
     workspaceId: string,
     state: Partial<WorkspacePanelState>
   ) => void;
+  setFilePanelMode: (workspaceId: string | undefined, mode: FilePanelMode) => void;
+  setSelectedAllFilePath: (
+    workspaceId: string | undefined,
+    filePath: string | null
+  ) => void;
 
   // Kanban view selection actions
   setKanbanProjectView: (projectId: string, viewId: string) => void;
@@ -619,6 +630,38 @@ export const useUiPreferencesStore = create<State>()((set, get) => ({
         [workspaceId]: {
           ...currentWsState,
           ...panelState,
+        },
+      },
+    });
+  },
+
+  setFilePanelMode: (workspaceId, mode) => {
+    if (!workspaceId) return;
+    const state = get();
+    const wsState =
+      state.workspacePanelStates[workspaceId] ?? DEFAULT_WORKSPACE_PANEL_STATE;
+    set({
+      workspacePanelStates: {
+        ...state.workspacePanelStates,
+        [workspaceId]: {
+          ...wsState,
+          filePanelMode: mode,
+        },
+      },
+    });
+  },
+
+  setSelectedAllFilePath: (workspaceId, filePath) => {
+    if (!workspaceId) return;
+    const state = get();
+    const wsState =
+      state.workspacePanelStates[workspaceId] ?? DEFAULT_WORKSPACE_PANEL_STATE;
+    set({
+      workspacePanelStates: {
+        ...state.workspacePanelStates,
+        [workspaceId]: {
+          ...wsState,
+          selectedAllFilePath: filePath,
         },
       },
     });
@@ -920,6 +963,10 @@ export function useWorkspacePanelState(workspaceId: string | undefined) {
   const setLeftMainPanelVisible = useUiPreferencesStore(
     (s) => s.setLeftMainPanelVisible
   );
+  const setFilePanelMode = useUiPreferencesStore((s) => s.setFilePanelMode);
+  const setSelectedAllFilePath = useUiPreferencesStore(
+    (s) => s.setSelectedAllFilePath
+  );
   const setLeftSidebarVisible = useUiPreferencesStore(
     (s) => s.setLeftSidebarVisible
   );
@@ -940,11 +987,21 @@ export function useWorkspacePanelState(workspaceId: string | undefined) {
     (value: boolean) => setLeftMainPanelVisible(value, workspaceId),
     [setLeftMainPanelVisible, workspaceId]
   );
+  const setFilePanelModeForWorkspace = useCallback(
+    (mode: FilePanelMode) => setFilePanelMode(workspaceId, mode),
+    [setFilePanelMode, workspaceId]
+  );
+  const setSelectedAllFilePathForWorkspace = useCallback(
+    (filePath: string | null) => setSelectedAllFilePath(workspaceId, filePath),
+    [setSelectedAllFilePath, workspaceId]
+  );
 
   return {
     // Workspace-specific state
     rightMainPanelMode: wsState.rightMainPanelMode,
     isLeftMainPanelVisible: wsState.isLeftMainPanelVisible,
+    filePanelMode: wsState.filePanelMode,
+    selectedAllFilePath: wsState.selectedAllFilePath,
 
     // Global state (sidebars and terminal)
     isLeftSidebarVisible,
@@ -955,6 +1012,8 @@ export function useWorkspacePanelState(workspaceId: string | undefined) {
     toggleRightMainPanelMode: toggleRightMainPanelModeForWorkspace,
     setRightMainPanelMode: setRightMainPanelModeForWorkspace,
     setLeftMainPanelVisible: setLeftMainPanelVisibleForWorkspace,
+    setFilePanelMode: setFilePanelModeForWorkspace,
+    setSelectedAllFilePath: setSelectedAllFilePathForWorkspace,
 
     // Global actions
     setLeftSidebarVisible,

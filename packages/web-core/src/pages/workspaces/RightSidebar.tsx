@@ -15,14 +15,17 @@ import {
   PersistKey,
   RIGHT_MAIN_PANEL_MODES,
   type RightMainPanelMode,
+  type FilePanelMode,
   useExpandedAll,
   usePersistedExpanded,
+  useWorkspacePanelState,
   useUiPreferencesStore,
 } from '@/shared/stores/useUiPreferencesStore';
 import {
   CollapsibleSectionHeader,
   type SectionAction,
 } from '@vibe/ui/components/CollapsibleSectionHeader';
+import { cn } from '@/shared/lib/utils';
 
 type SectionDef = {
   title: string;
@@ -31,6 +34,7 @@ type SectionDef = {
   expanded: boolean;
   content: React.ReactNode;
   actions: SectionAction[];
+  headerExtra?: React.ReactNode;
 };
 
 export interface RightSidebarProps {
@@ -75,6 +79,48 @@ export function RightSidebar({
     PERSIST_KEYS.notesSection,
     false
   );
+  const workspaceId = selectedWorkspace?.id;
+  const { filePanelMode, setFilePanelMode } = useWorkspacePanelState(workspaceId);
+
+  const renderChangesModeToggle = () => {
+    const handleSetMode = (mode: FilePanelMode) => {
+      setFilePanelMode(mode);
+    };
+    return (
+      <div className="inline-flex items-center rounded-sm border border-border overflow-hidden">
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            handleSetMode('changes');
+          }}
+          className={cn(
+            'px-2 py-0.5 text-xs transition-colors',
+            filePanelMode === 'changes'
+              ? 'bg-panel text-normal'
+              : 'bg-transparent text-low hover:text-normal'
+          )}
+        >
+          {t('common:changesMode.changes')}
+        </button>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            handleSetMode('all');
+          }}
+          className={cn(
+            'px-2 py-0.5 text-xs transition-colors border-l border-border',
+            filePanelMode === 'all'
+              ? 'bg-panel text-normal'
+              : 'bg-transparent text-low hover:text-normal'
+          )}
+        >
+          {t('common:changesMode.all')}
+        </button>
+      </div>
+    );
+  };
 
   const hasUpperContent =
     rightMainPanelMode === RIGHT_MAIN_PANEL_MODES.CHANGES ||
@@ -132,7 +178,7 @@ export function RightSidebar({
       case RIGHT_MAIN_PANEL_MODES.CHANGES:
         if (selectedWorkspace) {
           result.unshift({
-            title: 'Changes',
+            title: t('common:sections.changes'),
             persistKey: PERSIST_KEYS.changesSection,
             visible: hasUpperContent,
             expanded: upperExpanded,
@@ -141,6 +187,7 @@ export function RightSidebar({
                 key={selectedWorkspace.id}
                 workspaceId={selectedWorkspace.id}
                 diffs={diffs}
+                mode={filePanelMode}
                 onSelectFile={(path) => {
                   selectFile(path);
                   setExpanded(`diff:${path}`, true);
@@ -149,6 +196,7 @@ export function RightSidebar({
               />
             ),
             actions: [],
+            headerExtra: renderChangesModeToggle(),
           });
         }
         break;
@@ -201,6 +249,7 @@ export function RightSidebar({
                 persistKey={section.persistKey}
                 defaultExpanded={section.expanded}
                 actions={section.actions}
+                headerExtra={section.headerExtra}
               >
                 <div className="flex flex-1 border-t min-h-[200px] w-full overflow-auto">
                   {section.content}

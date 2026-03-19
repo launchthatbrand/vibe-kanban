@@ -176,6 +176,7 @@
   "fileTree": {
     "searchPlaceholder": "Search files...",
     "noResults": "No matching files",
+    "noFiles": "No files found",
     "title": "Files",
     "showGitHubComments": "Show GitHub comments",
     "hideGitHubComments": "Hide GitHub comments",
@@ -184,6 +185,7 @@
   },
   "sections": {
     "changes": "Changes",
+    "files": "Files",
     "repositories": "Repositories",
     "addRepositories": "Add Repositories",
     "project": "Project",
@@ -206,7 +208,20 @@
     "cancel": "Cancel",
     "saveChanges": "Save Changes",
     "copied": "Copied",
-    "collapse": "Collapse"
+    "collapse": "Collapse",
+    "refresh": "Refresh",
+    "openInIde": "Open in IDE"
+  },
+  "fileEditor": {
+    "noFileSelected": "No file selected",
+    "selectFilePrompt": "Select a file from the All tree to start editing.",
+    "loadError": "Failed to load file",
+    "binaryUnsupported": "Binary files cannot be edited in-app.",
+    "fileTooLarge": "This file is too large to edit in-app."
+  },
+  "changesMode": {
+    "changes": "Changes",
+    "all": "All"
   },
   "comments": {
     "addReviewComment": "Add Review Comment",
